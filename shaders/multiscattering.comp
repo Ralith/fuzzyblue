@@ -1,0 +1,58 @@
+#version 450
+
+#include "precompute.h"
+
+// Incoming from bounce n-1
+layout (set=1, binding=0) uniform sampler2D gathered;
+// Outgoing for bounce n
+layout (set=1, binding=1, rgba16f) uniform writeonly image3D table;
+layout (set=1, binding=2, rgba16f) uniform image3D aggregate;
+
+void main() {
+    float u_h = gl_GlobalInvocationID.x / float(gl_NumWorkGroups.x - 1);
+    float height = coord_to_height(u_h);
+    float u_v = gl_GlobalInvocationID.y / float(gl_NumWorkGroups.y - 1);
+    float cos_view = coord_to_cos_view(height, u_v);
+    float u_s = gl_GlobalInvocationID.z / float(gl_NumWorkGroups.z - 1);
+    float cos_sun = coord_to_cos_sun(u_s);
+
+    vec2 p_a = vec2(height + R_planet, 0);
+    vec2 direction = cos_view_dir(cos_view);
+    vec2 p_b = intersection(p_a, direction);
+    float step_size = distance(p_a, p_b) / STEPS;
+    float prev_density_m = 0;
+    float prev_density_r = 0;
+    float total_density_m = 0;
+    float total_density_r = 0;
+    float prev_in_m = 0;
+    vec3 prev_in_r = vec3(0);
+    float total_in_m = 0;
+    vec3 total_in_r = vec3(0);
+    const float beta_e_m = beta_m / 0.9; // due to Bruneton
+    for (int step = 0; step < STEPS; ++step) {
+        vec2 p = p_a + step_size * step * direction;
+
+        float d_m = density_m(point_height(p));
+        float d_r = density_r(point_height(p));
+        total_density_m += step_size * (d_m + prev_density_m) / 2;
+        total_density_r += step_size * (d_r + prev_density_r) / 2;
+        prev_density_m = d_m;
+        prev_density_r = d_r;
+
+        vec3 transmittance = exp(-(total_density_r * beta_r.rgb + total_density_m * beta_e_m));
+
+        vec4 incoming = texture(gathered, vec2(u_h, u_s));
+        float in_m = incoming.a * density_m(point_height(p)) * transmittance.r;
+        vec3 in_r = incoming.rgb * density_r(point_height(p)) * transmittance;
+        total_in_m += (in_m + prev_in_m) / 2 * step_size;
+        total_in_r += (in_r + prev_in_r) / 2 * step_size;
+        prev_in_m = in_m;
+        prev_in_r = in_r;
+    }
+    total_in_m *= beta_m / (4 * pi);
+    total_in_r *= beta_r.rgb / (4 * pi);
+    ivec3 coords = ivec3(gl_GlobalInvocationID.xyz);
+    vec4 value = vec4(total_in_r, total_in_m);
+    imageStore(table, coords, value);
+    imageStore(aggregate, coords, value + imageLoad(aggregate, coords));
+}

@@ -1,0 +1,52 @@
+#version 450
+
+#include "precompute.h"
+
+layout (set=1, binding=0, rgba16f) uniform writeonly image2D table;
+
+// Precompute transmittance to a point at a certain altitude along a ray towards the atmosphere
+void main() {
+    float height = coord_to_height(gl_GlobalInvocationID.x / float(gl_NumWorkGroups.x - 1));
+    float cos_view = coord_to_cos_view(height, gl_GlobalInvocationID.y / float(gl_NumWorkGroups.y - 1));
+
+    vec2 p_a = vec2(height + R_planet, 0);
+    vec2 dir = cos_view_dir(cos_view);
+    if (!isinf(ray_circle(p_a, dir, R_planet, true))) {
+        imageStore(table, ivec2(gl_GlobalInvocationID.xy), vec4(0, 0, 0, 1));
+        return;
+    }
+    float t = ray_circle(p_a, dir, R_planet + H_atm, false);
+    if (isinf(t)) {
+        imageStore(table, ivec2(gl_GlobalInvocationID.xy), vec4(1, 1, 1, 1));
+        return;
+    }
+    vec2 p_b = p_a + t * dir;
+
+    float step_size = distance(p_a, p_b) / STEPS;
+    float prev_m = 0;
+    float prev_r = 0;
+    float prev_o = 0;
+    float total_m = 0;
+    float total_r = 0;
+    float total_o = 0;
+    for (int step = 0; step < STEPS; ++step) {
+        vec2 s = p_a + step_size * step * dir;
+        float m = density_m(point_height(s));
+        float r = density_r(point_height(s));
+        float o = 6e-7 * r;
+        total_m += step_size * (m + prev_m) / 2;
+        total_r += step_size * (r + prev_r) / 2;
+        total_o += step_size * (o + prev_o) / 2;
+        prev_m = m;
+        prev_r = r;
+        prev_o = o;
+    }
+    const float beta_e_m = beta_m / 0.9; // due to Bruneton
+    // Constants from http://www.iup.uni-bremen.de/gruppen/molspec/databases/referencespectra/o3spectra2011/
+    // Multiplied by the sea level number density of air to get m^-1
+    const vec3 beta_e_o = vec3(3.174750760570497, 6.920199502316864, 1.035221457982393);
+    // beta_r used as beta_e_r because things that cause rayleigh scattering don't absorb light
+    vec3 transmittance = exp(-(total_r * beta_r.rgb + total_m * beta_e_m + total_o * beta_e_o.rgb));
+
+    imageStore(table, ivec2(gl_GlobalInvocationID.xy), vec4(transmittance, 1));
+}

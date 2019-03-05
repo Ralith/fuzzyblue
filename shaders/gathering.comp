@@ -1,0 +1,28 @@
+#version 450
+
+#include "precompute.h"
+
+// Light scattered towards `view` by exactly n bounces at a point at `height` under `sun`
+layout (set=1, binding=0) uniform sampler3D scattering;
+// Incoming light scattered by n bounces into a point at `height` under `sun`
+layout (set=1, binding=1, rgba16f) uniform writeonly image2D gathering_table;
+// Total incoming light to a point
+layout (set=1, binding=2, rgba16f) uniform image2D accum_table;
+
+void main() {
+    float u_h = gl_GlobalInvocationID.x / float(gl_NumWorkGroups.x - 1);
+    float height = coord_to_height(u_h);
+    float u_s = gl_GlobalInvocationID.y / float(gl_NumWorkGroups.y - 1);
+    float cos_sun = coord_to_cos_sun(u_s);
+
+    vec4 gathered = vec4(0);
+    for (float view = 0; view < 2 * pi; view += 2 * pi / STEPS) {
+        gathered += texture(scattering, vec3(u_h, cos_view_to_coord(height, cos(view)), u_s));
+    }
+    gathered *= 4 * pi / STEPS;
+
+    ivec2 index = ivec2(gl_GlobalInvocationID.xy);
+    imageStore(gathering_table, index, gathered);
+    vec4 prev = imageLoad(accum_table, index);
+    imageStore(accum_table, index, prev + gathered);
+}
