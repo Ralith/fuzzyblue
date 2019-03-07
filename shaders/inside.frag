@@ -1,8 +1,5 @@
 #version 450
 
-/* From 2000 ASTM Standard Extraterrestrial Spectrum Reference */
-const vec3 SOLAR_IRRADIANCE = vec3(1558, 1916, 2051) * 6e-3;
-
 layout (location = 0) in vec2 screen;
 
 layout (location = 0) out vec4 f_color;
@@ -22,6 +19,8 @@ layout (push_constant) uniform Uniforms {
     vec3 zenith;
     float height;
     vec3 sun_direction;
+    float mie_anisotropy;
+    vec3 solar_irradiance;
 };
 
 #include "mapping.h"
@@ -30,11 +29,10 @@ float phase_r(float cos_theta) {
     return 0.8 * (1.4 + 0.5 * cos_theta);
 }
 
-const float g = 0.76;
-
 float phase_m(float cos_theta) {
+    float g = mie_anisotropy;
     return (3 * (1 - g * g) / (2 * (2 + g * g)))
-        * (1 + cos_theta * cos_theta) / pow(1 + g * g + - 2 * g * cos_theta, 1.5);
+        * (1 + cos_theta * cos_theta) / pow(1 + g * g - 2 * g * cos_theta, 1.5);
 }
 
 void main() {
@@ -51,6 +49,6 @@ void main() {
         mie = rayleigh * (value.a / value.r) * beta_r.r / beta_m * vec3(beta_m) / beta_r;
     }
     float cos_theta = dot(view, sun_direction);
-    vec3 color = SOLAR_IRRADIANCE * (phase_r(cos_theta) * rayleigh + phase_m(cos_theta) * mie);
+    vec3 color = solar_irradiance * (phase_r(cos_theta) * rayleigh + phase_m(cos_theta) * mie);
     f_color = vec4(color, 0);
 }

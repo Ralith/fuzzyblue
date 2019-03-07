@@ -1437,7 +1437,37 @@ pub struct DrawParams {
     pub height: f32,
     /// Unit vector towards the sun
     pub sun_direction: [f32; 3],
+    /// Anisotropy factor for the Mie scattering phase function (in [-1,1])
+    ///
+    /// `MIE_ANISOTROPY_AIR` is a reasonable default value for this.
+    pub mie_anisotropy: f32,
+    /// Irradiance of sunlight outside of the atmosphere for each channel (W/m^2)
+    ///
+    /// `SOL_IRRADIANCE` is a reasonable default value for this.
+    pub solar_irradiance: [f32; 3],
 }
+
+impl Default for DrawParams {
+    fn default() -> Self {
+        Self {
+            inverse_viewproj: [[0.0; 4]; 4],
+            zenith: [0.0, 1.0, 0.0],
+            height: 0.0,
+            sun_direction: [0.0, 1.0, 0.0],
+            mie_anisotropy: MIE_ANISOTROPY_AIR,
+            solar_irradiance: SOL_IRRADIANCE,
+        }
+    }
+}
+
+/// Mie anisotropy factor for Earth's atmosphere
+pub const MIE_ANISOTROPY_AIR: f32 = 0.76;
+
+/// Irradiance of Sol at the top of Earth's atmosphere
+///
+/// Values from the 2000 ASTM Standard Extraterrestrial Spectrum Reference, for wavelengths those
+/// used to compute `Param`'s defaults.
+pub const SOL_IRRADIANCE: [f32; 3] = [1498.0, 1862.0, 1713.0];
 
 fn find_memory_type(
     device_props: &vk::PhysicalDeviceMemoryProperties,
