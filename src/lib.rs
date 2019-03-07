@@ -973,12 +973,14 @@ pub const IOR_AIR: f32 = 1.0003;
 /// `Params::default().beta_r`
 pub const DENSITY_AIR: f32 = 2.545e25;
 
-/// red wavelength
-pub const LAMBDA_R: f64 = 6.5e-7;
-/// green wavelength
-pub const LAMBDA_G: f64 = 5.1e-7;
-/// blue wavelength
-pub const LAMBDA_B: f64 = 4.75e-7;
+// Wavelengths based on Bruneton
+/// red wavelength, used to compute `Params::default().beta_r[0]`
+pub const LAMBDA_R: f32 = 680e-9;
+/// green wavelength, used to compute `Params::default().beta_r[1]`
+pub const LAMBDA_G: f32 = 550e-9;
+/// blue wavelength, used to compute `Params::default().beta_r[2]`
+pub const LAMBDA_B: f32 = 440e-9;
+
 /// Extinction coefficients for Ozone on Earth
 ///
 // Constants from http://www.iup.uni-bremen.de/gruppen/molspec/databases/referencespectra/o3spectra2011/
