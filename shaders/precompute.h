@@ -1,13 +1,6 @@
 const int STEPS = 30;
 
-layout(set = 0, binding = 0) uniform Params {
-    float H_atm;
-    float R_planet;
-    float H_r;
-    float H_m;
-    vec3 beta_r;
-    float beta_m;
-};
+#include "params.h"
 
 float density_r(float h) { return exp(-h/H_r); }
 float density_m(float h) { return exp(-h/H_m); }

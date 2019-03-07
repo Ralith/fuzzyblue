@@ -1,3 +1,8 @@
+//! Real-time physically based atmospheric scattering rendering
+//!
+//! Primarily derived from G. Bodare and E. Sandberg's "Efficient and Dynamic Atmospheric
+//! Scattering." See also E. Bruneton and F. Neyret's "Precomputed atmospheric scattering".
+
 use std::{mem, ptr, sync::Arc};
 
 use ash::version::{DeviceV1_0, InstanceV1_0};
@@ -641,7 +646,7 @@ impl Builder {
                 cmd,
                 params,
                 0,
-                &mem::transmute::<_, [u8; 32]>(*atmosphere_params),
+                &mem::transmute::<_, [u8; 48]>(*atmosphere_params),
             );
             self.device.cmd_pipeline_barrier(
                 cmd,
@@ -935,6 +940,9 @@ struct Image {
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
+/// Static characteristics of a planet's atmosphere
+///
+/// These are read during precomputation, and hence cannot change rapidly.
 pub struct Params {
     /// Maximum height of atmosphere (m)
     pub h_atm: f32,
@@ -945,38 +953,77 @@ pub struct Params {
     /// Scale height of mie particles (m)
     pub h_m: f32,
     /// Rayleigh scattering coefficients for each color's wavelength (m^-1)
+    ///
+    /// On Earth, Rayleigh scattering is responsible for blue skies and red sunsets, both due to the
+    /// relatively high proportion of blue light which it scatters.
     pub beta_r: [f32; 3],
     /// Mie scattering coefficient (m^-1)
+    ///
+    /// Mie scattering produces a white halo around the sun.
     pub beta_m: f32,
+    /// Extinction coefficient due to ozone
+    pub beta_e_o: [f32; 3],
+    /// Mie extinction coefficient, i.e. scattering + absorbtion
+    pub beta_e_m: f32,
 }
 
-pub const IOR_AIR: f64 = 1.0003;
-/// molecules/m^3
-pub const DENSITY_AIR: f64 = 2.545e25;
+/// Average index of refraction Earth's atmosphere, used to compute `Params::default().beta_r`
+pub const IOR_AIR: f32 = 1.0003;
+/// Number density of Earth's atmosphere at sea level (molecules/m^3), used to compute
+/// `Params::default().beta_r`
+pub const DENSITY_AIR: f32 = 2.545e25;
+
 /// red wavelength
 pub const LAMBDA_R: f64 = 6.5e-7;
 /// green wavelength
 pub const LAMBDA_G: f64 = 5.1e-7;
 /// blue wavelength
 pub const LAMBDA_B: f64 = 4.75e-7;
+/// Extinction coefficients for Ozone on Earth
+///
+// Constants from http://www.iup.uni-bremen.de/gruppen/molspec/databases/referencespectra/o3spectra2011/
+// 2e-21, 3e-21, 1e-22 cm^2
+// Multiplied by the number density of air * 1e-4 to get m^-1
+// Very handwavey figuring, could use a more principled datum.
+pub const OZONE_EXTINCTION_COEFFICIENT: [f32; 3] = [5.09, 7.635, 0.2545];
 
-pub fn compute_beta_rayleigh(ior: f64, molecular_density: f64, wavelength: f64) -> f64 {
-    8.0 * std::f64::consts::PI.powi(3) * (ior.powi(2) - 1.0).powi(2)
+/// Compute the Rayleigh scattering factor at a certain wavelength
+///
+/// `ior` - index of refraction
+/// `molecular_density` - number of Rayleigh particles (i.e. molecules) per cubic meter at sea level
+/// `wavelength` - wavelength to compute β_R for
+pub fn beta_rayleigh(ior: f32, molecular_density: f32, wavelength: f32) -> f32 {
+    8.0 * std::f32::consts::PI.powi(3) * (ior.powi(2) - 1.0).powi(2)
         / (3.0 * molecular_density * wavelength.powi(4))
+}
+
+/// Compute the wavelength-independent Mie scattering factor
+///
+/// `ior` - index of refraction of the aerosol particle
+/// `molecular_density` - number of Mie particles (i.e. aerosols) per cubic meter at sea level
+/// `wavelength` - wavelength to compute β_R for
+pub fn beta_mie(ior: f32, particle_density: f32) -> f32 {
+    8.0 * std::f32::consts::PI.powi(3) * (ior.powi(2) - 1.0).powi(2)
+        / (3.0 * particle_density)
 }
 
 impl Default for Params {
     fn default() -> Self {
-        let r = compute_beta_rayleigh(IOR_AIR, DENSITY_AIR, LAMBDA_R) as f32;
-        let g = compute_beta_rayleigh(IOR_AIR, DENSITY_AIR, LAMBDA_G) as f32;
-        let b = compute_beta_rayleigh(IOR_AIR, DENSITY_AIR, LAMBDA_B) as f32;
+        let r = beta_rayleigh(IOR_AIR, DENSITY_AIR, LAMBDA_R);
+        let g = beta_rayleigh(IOR_AIR, DENSITY_AIR, LAMBDA_G);
+        let b = beta_rayleigh(IOR_AIR, DENSITY_AIR, LAMBDA_B);
+        // from Bruneton
+        let beta_m = 2.2e-5;
+        let beta_e_m = beta_m / 0.9;
         Self {
             h_atm: 80_000.0,
             r_planet: 6371e3,
             h_r: 8_000.0,
             h_m: 1_200.0,
             beta_r: [r, g, b],
-            beta_m: 2e-5, // Fudged, per Bruneton
+            beta_m,
+            beta_e_o: OZONE_EXTINCTION_COEFFICIENT,
+            beta_e_m,
         }
     }
 }
@@ -1398,7 +1445,7 @@ impl Renderer {
                 self.pipeline_layout,
                 vk::ShaderStageFlags::FRAGMENT,
                 0,
-                &mem::transmute::<_, [u8; 92]>(*params),
+                &mem::transmute::<_, [u8; 108]>(*params),
             );
             // TODO: Double-check necessity
             self.device.cmd_set_viewport(

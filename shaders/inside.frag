@@ -4,14 +4,8 @@ layout (location = 0) in vec2 screen;
 
 layout (location = 0) out vec4 f_color;
 
-layout (set = 0, binding = 0) uniform Params {
-    float H_atm;
-    float R_planet;
-    float H_r;
-    float H_m;
-    vec3 beta_r;
-    float beta_m;
-};
+#include "params.h"
+
 layout (set = 0, binding = 1) uniform sampler3D scattering;
 
 layout (push_constant) uniform Uniforms {

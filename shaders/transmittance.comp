@@ -41,10 +41,6 @@ void main() {
         prev_r = r;
         prev_o = o;
     }
-    const float beta_e_m = beta_m / 0.9; // due to Bruneton
-    // Constants from http://www.iup.uni-bremen.de/gruppen/molspec/databases/referencespectra/o3spectra2011/
-    // Multiplied by the sea level number density of air to get m^-1
-    const vec3 beta_e_o = vec3(3.174750760570497, 6.920199502316864, 1.035221457982393);
     // beta_r used as beta_e_r because things that cause rayleigh scattering don't absorb light
     vec3 transmittance = exp(-(total_r * beta_r.rgb + total_m * beta_e_m + total_o * beta_e_o.rgb));
 
