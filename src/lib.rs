@@ -1434,7 +1434,7 @@ impl Renderer {
                                     vk::PipelineColorBlendAttachmentState {
                                         blend_enable: vk::TRUE,
                                         src_color_blend_factor: vk::BlendFactor::ONE,
-                                        dst_color_blend_factor: vk::BlendFactor::ZERO,
+                                        dst_color_blend_factor: vk::BlendFactor::ONE,
                                         color_blend_op: vk::BlendOp::ADD,
                                         src_alpha_blend_factor: vk::BlendFactor::ONE,
                                         dst_alpha_blend_factor: vk::BlendFactor::ZERO,
