@@ -1301,7 +1301,7 @@ impl Renderer {
                                 module: vert_shader,
                                 p_name: entry_point,
                                 p_specialization_info: &*vk::SpecializationInfo::builder()
-                                    .data(&(inverse_z as u32 as f32).to_bits().to_ne_bytes())
+                                    .data(&(!inverse_z as u32 as f32).to_bits().to_ne_bytes())
                                     .map_entries(&[vk::SpecializationMapEntry {
                                         constant_id: 0,
                                         offset: 0,
