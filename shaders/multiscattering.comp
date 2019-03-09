@@ -18,6 +18,7 @@ void main() {
 
     vec2 p_a = vec2(height + R_planet, 0);
     vec2 direction = cos_view_dir(cos_view);
+    vec2 sun_direction = cos_view_dir(cos_sun);
     vec2 p_b = intersection(p_a, direction);
     float step_size = distance(p_a, p_b) / STEPS;
     float prev_density_m = 0;
@@ -31,9 +32,11 @@ void main() {
     const float beta_e_m = beta_m / 0.9; // due to Bruneton
     for (int step = 0; step < STEPS; ++step) {
         vec2 p = p_a + step_size * step * direction;
+        vec2 zenith = normalize(p);
+        float p_h = point_height(p);
 
-        float d_m = density_m(point_height(p));
-        float d_r = density_r(point_height(p));
+        float d_m = density_m(p_h);
+        float d_r = density_r(p_h);
         total_density_m += step_size * (d_m + prev_density_m) / 2;
         total_density_r += step_size * (d_r + prev_density_r) / 2;
         prev_density_m = d_m;
@@ -41,9 +44,9 @@ void main() {
 
         vec3 transmittance = exp(-(total_density_r * beta_r.rgb + total_density_m * beta_e_m));
 
-        vec4 incoming = texture(gathered, vec2(u_h, u_s));
-        float in_m = incoming.a * density_m(point_height(p)) * transmittance.r;
-        vec3 in_r = incoming.rgb * density_r(point_height(p)) * transmittance;
+        vec4 incoming = texture(gathered, vec2(height_to_coord(p_h), cos_sun_to_coord(dot(sun_direction, zenith))));
+        float in_m = incoming.a * density_m(p_h) * transmittance.r;
+        vec3 in_r = incoming.rgb * density_r(p_h) * transmittance;
         total_in_m += (in_m + prev_in_m) / 2 * step_size;
         total_in_r += (in_r + prev_in_r) / 2 * step_size;
         prev_in_m = in_m;
