@@ -41,6 +41,8 @@ pub struct Builder {
     compute_queue_family: Option<u32>,
     sampler: vk::Sampler,
     params_layout: vk::DescriptorSetLayout,
+    /// Layout of per-atmosphere descriptor sets
+    static_layout: vk::DescriptorSetLayout,
     transmittance: Pass,
     scattering: Pass,
     // These reuse scattering's (ds_)layout
@@ -77,6 +79,8 @@ impl Drop for Builder {
             self.device.destroy_sampler(self.sampler, None);
             self.device
                 .destroy_descriptor_set_layout(self.params_layout, None);
+            self.device
+                .destroy_descriptor_set_layout(self.static_layout, None);
         }
     }
 }
@@ -118,6 +122,28 @@ impl Builder {
                         border_color: vk::BorderColor::FLOAT_TRANSPARENT_BLACK,
                         ..Default::default()
                     },
+                    None,
+                )
+                .unwrap();
+
+            let static_layout = device
+                .create_descriptor_set_layout(
+                    &vk::DescriptorSetLayoutCreateInfo::builder().bindings(&[
+                        vk::DescriptorSetLayoutBinding {
+                            binding: 0,
+                            descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+                            descriptor_count: 1,
+                            stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                            p_immutable_samplers: ptr::null(),
+                        },
+                        vk::DescriptorSetLayoutBinding {
+                            binding: 1,
+                            descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                            descriptor_count: 1,
+                            stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                            p_immutable_samplers: &sampler,
+                        },
+                    ]),
                     None,
                 )
                 .unwrap();
@@ -280,6 +306,7 @@ impl Builder {
                 compute_queue_family,
                 sampler,
                 params_layout,
+                static_layout,
                 transmittance,
                 scattering,
                 gathering,
@@ -299,7 +326,8 @@ impl Builder {
             // gathering: 1 sampled image, 2 storage images
             // multiscattering: 1 sampled image, 2 storage image
             // ====
-            // 1 uniform, 4 sampled images, 8 storage images
+            // 1 uniform, 3 sampled images, 7 storage images for precompute
+            // + 1 uniform, 1 sampled image for static descriptor set
             let descriptor_pool = self
                 .device
                 .create_descriptor_pool(
@@ -308,11 +336,11 @@ impl Builder {
                         .pool_sizes(&[
                             vk::DescriptorPoolSize {
                                 ty: vk::DescriptorType::UNIFORM_BUFFER,
-                                descriptor_count: 1,
+                                descriptor_count: 2,
                             },
                             vk::DescriptorPoolSize {
                                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                                descriptor_count: 3,
+                                descriptor_count: 4,
                             },
                             vk::DescriptorPoolSize {
                                 ty: vk::DescriptorType::STORAGE_IMAGE,
@@ -330,6 +358,7 @@ impl Builder {
                         .descriptor_pool(descriptor_pool)
                         .set_layouts(&[
                             self.params_layout,
+                            self.static_layout,
                             self.transmittance.ds_layout,
                             self.scattering.ds_layout,
                             self.scattering.ds_layout,
@@ -339,6 +368,7 @@ impl Builder {
                 .unwrap()
                 .into_iter();
             let params_ds = descriptor_sets.next().unwrap();
+            let static_ds = descriptor_sets.next().unwrap();
             let transmittance_ds = descriptor_sets.next().unwrap();
             let scattering_ds = descriptor_sets.next().unwrap();
             let gathering_ds = descriptor_sets.next().unwrap();
@@ -427,6 +457,32 @@ impl Builder {
 
             self.device.update_descriptor_sets(
                 &[
+                    vk::WriteDescriptorSet {
+                        dst_set: static_ds,
+                        dst_binding: 0,
+                        dst_array_element: 0,
+                        descriptor_count: 1,
+                        descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+                        p_buffer_info: &vk::DescriptorBufferInfo {
+                            buffer: params,
+                            offset: 0,
+                            range: vk::WHOLE_SIZE,
+                        },
+                        ..Default::default()
+                    },
+                    vk::WriteDescriptorSet {
+                        dst_set: static_ds,
+                        dst_binding: 1,
+                        dst_array_element: 0,
+                        descriptor_count: 1,
+                        descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                        p_image_info: &vk::DescriptorImageInfo {
+                            sampler: vk::Sampler::null(),
+                            image_view: scattering.view,
+                            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        },
+                        ..Default::default()
+                    },
                     vk::WriteDescriptorSet {
                         dst_set: params_ds,
                         dst_binding: 0,
@@ -870,11 +926,12 @@ impl Builder {
                 device: self.device.clone(),
                 inner: Some(Atmosphere {
                     device: self.device.clone(),
+                    descriptor_pool,
                     scattering,
                     params,
                     params_mem,
+                    ds: static_ds,
                 }),
-                descriptor_pool,
                 single_order,
                 gathered,
                 gathered_sum,
@@ -1043,7 +1100,6 @@ struct Pass {
 pub struct PendingAtmosphere {
     device: Arc<Device>,
     inner: Option<Atmosphere>,
-    descriptor_pool: vk::DescriptorPool,
     single_order: Image,
     gathered: Image,
     gathered_sum: Image,
@@ -1053,8 +1109,6 @@ pub struct PendingAtmosphere {
 impl Drop for PendingAtmosphere {
     fn drop(&mut self) {
         unsafe {
-            self.device
-                .destroy_descriptor_pool(self.descriptor_pool, None);
             for &image in &[
                 &self.single_order,
                 &self.gathered,
@@ -1126,14 +1180,18 @@ impl PendingAtmosphere {
 /// As with any Vulkan object, this must not be dropped while in use by a rendering operation.
 pub struct Atmosphere {
     device: Arc<Device>,
+    descriptor_pool: vk::DescriptorPool,
     scattering: Image,
     params: vk::Buffer,
     params_mem: vk::DeviceMemory,
+    ds: vk::DescriptorSet,
 }
 
 impl Drop for Atmosphere {
     fn drop(&mut self) {
         unsafe {
+            self.device
+                .destroy_descriptor_pool(self.descriptor_pool, None);
             self.device.destroy_image_view(self.scattering.view, None);
             self.device.destroy_image(self.scattering.handle, None);
             self.device.free_memory(self.scattering.memory, None);
@@ -1148,23 +1206,16 @@ pub struct Renderer {
     sampler: vk::Sampler,
     vert_shader: vk::ShaderModule,
     frag_shader: vk::ShaderModule,
-    ds_layout: vk::DescriptorSetLayout,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
-    descriptor_pool: vk::DescriptorPool,
-    ds: vk::DescriptorSet,
 }
 
 impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
-            self.device
-                .destroy_descriptor_pool(self.descriptor_pool, None);
             self.device.destroy_pipeline(self.pipeline, None);
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
-            self.device
-                .destroy_descriptor_set_layout(self.ds_layout, None);
             self.device.destroy_shader_module(self.vert_shader, None);
             self.device.destroy_shader_module(self.frag_shader, None);
             self.device.destroy_sampler(self.sampler, None);
@@ -1180,11 +1231,12 @@ impl Renderer {
     ///
     /// `inverse_z` indicates whether points distant from the camera have depth value 1.0
     pub fn new(
-        device: Arc<Device>,
+        builder: &Builder,
         cache: vk::PipelineCache,
         inverse_z: bool,
         render_pass: vk::RenderPass,
     ) -> Self {
+        let device = builder.device.clone();
         unsafe {
             let vert_shader = device
                 .create_shader_module(
@@ -1216,32 +1268,10 @@ impl Renderer {
                 )
                 .unwrap();
 
-            let ds_layout = device
-                .create_descriptor_set_layout(
-                    &vk::DescriptorSetLayoutCreateInfo::builder().bindings(&[
-                        vk::DescriptorSetLayoutBinding {
-                            binding: 0,
-                            descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-                            descriptor_count: 1,
-                            stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                            p_immutable_samplers: ptr::null(),
-                        },
-                        vk::DescriptorSetLayoutBinding {
-                            binding: 1,
-                            descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                            descriptor_count: 1,
-                            stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                            p_immutable_samplers: &sampler,
-                        },
-                    ]),
-                    None,
-                )
-                .unwrap();
-
             let pipeline_layout = device
                 .create_pipeline_layout(
                     &vk::PipelineLayoutCreateInfo::builder()
-                        .set_layouts(&[ds_layout])
+                        .set_layouts(&[builder.static_layout])
                         .push_constant_ranges(&[vk::PushConstantRange {
                             stage_flags: vk::ShaderStageFlags::FRAGMENT,
                             offset: 0,
@@ -1349,45 +1379,13 @@ impl Renderer {
                 .next()
                 .unwrap();
 
-            let descriptor_pool = device
-                .create_descriptor_pool(
-                    &vk::DescriptorPoolCreateInfo::builder()
-                        .max_sets(1)
-                        .pool_sizes(&[
-                            vk::DescriptorPoolSize {
-                                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                                descriptor_count: 1,
-                            },
-                            vk::DescriptorPoolSize {
-                                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                                descriptor_count: 1,
-                            },
-                        ]),
-                    None,
-                )
-                .unwrap();
-
-            let ds = device
-                .allocate_descriptor_sets(
-                    &vk::DescriptorSetAllocateInfo::builder()
-                        .descriptor_pool(descriptor_pool)
-                        .set_layouts(&[ds_layout]),
-                )
-                .unwrap()
-                .into_iter()
-                .next()
-                .unwrap();
-
             Self {
                 device,
                 sampler,
                 vert_shader,
                 frag_shader,
-                ds_layout,
                 pipeline_layout,
                 pipeline,
-                descriptor_pool,
-                ds,
             }
         }
     }
@@ -1400,38 +1398,6 @@ impl Renderer {
         viewport: vk::Extent2D,
     ) {
         unsafe {
-            self.device.update_descriptor_sets(
-                &[
-                    vk::WriteDescriptorSet {
-                        dst_set: self.ds,
-                        dst_binding: 0,
-                        dst_array_element: 0,
-                        descriptor_count: 1,
-                        descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
-                        p_buffer_info: &vk::DescriptorBufferInfo {
-                            buffer: atmosphere.params,
-                            offset: 0,
-                            range: vk::WHOLE_SIZE,
-                        },
-                        ..Default::default()
-                    },
-                    vk::WriteDescriptorSet {
-                        dst_set: self.ds,
-                        dst_binding: 1,
-                        dst_array_element: 0,
-                        descriptor_count: 1,
-                        descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                        p_image_info: &vk::DescriptorImageInfo {
-                            sampler: vk::Sampler::null(),
-                            image_view: atmosphere.scattering.view,
-                            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                        },
-                        ..Default::default()
-                    },
-                ],
-                &[],
-            );
-
             self.device
                 .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
             self.device.cmd_bind_descriptor_sets(
@@ -1439,7 +1405,7 @@ impl Renderer {
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline_layout,
                 0,
-                &[self.ds],
+                &[atmosphere.ds],
                 &[],
             );
             self.device.cmd_push_constants(
