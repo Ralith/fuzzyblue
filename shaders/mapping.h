@@ -1,5 +1,5 @@
 float height_to_coord(float h) { return pow(h/H_atm, 0.5); }
-float coord_to_height(float u_h) { return max(u_h * u_h * H_atm, 0.1); }
+float coord_to_height(float u_h) { return max(u_h * u_h * H_atm, 1); }
 
 float cos_view_to_coord(float height, float c_v) {
     const float c_h = -sqrt(height * (2 * R_planet + height)) / (R_planet + height);
