@@ -6,7 +6,7 @@ float cos_view_to_coord(float height, float c_v) {
     if (c_v > c_h) {
         return 0.5 * pow((c_v - c_h) / (1 - c_h), 0.2) + 0.5;
     } else {
-        return 0.5 * pow((c_h - c_v) / (c_h + 1), 0.2);
+        return 0.5 - (0.5 * pow((c_h - c_v) / (c_h + 1), 0.2));
     }
 }
 float coord_to_cos_view(float height, float u_v) {
@@ -14,7 +14,7 @@ float coord_to_cos_view(float height, float u_v) {
     if (u_v > 0.5) {
         return c_h + pow(2*u_v - 1, 5) * (1 - c_h);
     } else {
-        return c_h - pow(2*u_v, 5) * (1 + c_h);
+        return c_h - pow(2*(0.5 - u_v), 5) * (1 + c_h);
     }
 }
 
