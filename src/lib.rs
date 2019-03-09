@@ -138,7 +138,6 @@ impl Builder {
                         address_mode_u: vk::SamplerAddressMode::CLAMP_TO_EDGE,
                         address_mode_v: vk::SamplerAddressMode::CLAMP_TO_EDGE,
                         address_mode_w: vk::SamplerAddressMode::CLAMP_TO_EDGE,
-                        border_color: vk::BorderColor::FLOAT_TRANSPARENT_BLACK,
                         ..Default::default()
                     },
                     None,
