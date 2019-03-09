@@ -29,7 +29,6 @@ void main() {
     vec3 prev_in_r = vec3(0);
     float total_in_m = 0;
     vec3 total_in_r = vec3(0);
-    const float beta_e_m = beta_m / 0.9; // due to Bruneton
     for (int step = 0; step < STEPS; ++step) {
         vec2 p = p_a + step_size * step * direction;
         vec2 zenith = normalize(p);
