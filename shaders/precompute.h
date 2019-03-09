@@ -33,6 +33,9 @@ vec2 intersection(vec2 start, vec2 dir) {
 }
 
 vec2 cos_view_dir(float cos_view) {
+    // Rotates vec2(1, 0) by view. Integration always begins at a point with zenith vec2(1, 0), so
+    // this extracts the correct outgoing ray direction based on the parameterizations around such a
+    // starting point.
     return vec2(cos_view, sqrt(1 - cos_view * cos_view));
 }
 
