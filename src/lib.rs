@@ -43,6 +43,8 @@ pub struct Builder {
     params_layout: vk::DescriptorSetLayout,
     /// Layout of per-atmosphere descriptor sets
     static_layout: vk::DescriptorSetLayout,
+    /// Layout of per-atmosphere per-frame descriptor sets
+    frame_layout: vk::DescriptorSetLayout,
     transmittance: Pass,
     scattering: Pass,
     // These reuse scattering's (ds_)layout
@@ -81,6 +83,8 @@ impl Drop for Builder {
                 .destroy_descriptor_set_layout(self.params_layout, None);
             self.device
                 .destroy_descriptor_set_layout(self.static_layout, None);
+            self.device
+                .destroy_descriptor_set_layout(self.frame_layout, None);
         }
     }
 }
@@ -103,6 +107,21 @@ impl Builder {
                             descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
                             descriptor_count: 1,
                             stage_flags: vk::ShaderStageFlags::COMPUTE,
+                            p_immutable_samplers: ptr::null(),
+                        },
+                    ]),
+                    None,
+                )
+                .unwrap();
+
+            let frame_layout = device
+                .create_descriptor_set_layout(
+                    &vk::DescriptorSetLayoutCreateInfo::builder().bindings(&[
+                        vk::DescriptorSetLayoutBinding {
+                            binding: 0,
+                            descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
+                            descriptor_count: 1,
+                            stage_flags: vk::ShaderStageFlags::FRAGMENT,
                             p_immutable_samplers: ptr::null(),
                         },
                     ]),
@@ -307,6 +326,7 @@ impl Builder {
                 sampler,
                 params_layout,
                 static_layout,
+                frame_layout,
                 transmittance,
                 scattering,
                 gathering,
@@ -318,7 +338,12 @@ impl Builder {
     }
 
     /// Build an `Atmosphere` that will be usable when `cmd` is fully executed.
-    pub fn build(&self, cmd: vk::CommandBuffer, atmosphere_params: &Params) -> PendingAtmosphere {
+    pub fn build(
+        &self,
+        cmd: vk::CommandBuffer,
+        frame_count: u32,
+        atmosphere_params: &Params,
+    ) -> PendingAtmosphere {
         unsafe {
             // common: 1 uniform
             // transmittance: 1 storage image
@@ -328,11 +353,12 @@ impl Builder {
             // ====
             // 1 uniform, 3 sampled images, 7 storage images for precompute
             // + 1 uniform, 1 sampled image for static descriptor set
+            // + 1 input attachment per frame for dynamic descriptor sets
             let descriptor_pool = self
                 .device
                 .create_descriptor_pool(
                     &vk::DescriptorPoolCreateInfo::builder()
-                        .max_sets(6)
+                        .max_sets(6 + frame_count)
                         .pool_sizes(&[
                             vk::DescriptorPoolSize {
                                 ty: vk::DescriptorType::UNIFORM_BUFFER,
@@ -346,24 +372,34 @@ impl Builder {
                                 ty: vk::DescriptorType::STORAGE_IMAGE,
                                 descriptor_count: 7,
                             },
+                            vk::DescriptorPoolSize {
+                                ty: vk::DescriptorType::INPUT_ATTACHMENT,
+                                descriptor_count: frame_count,
+                            },
                         ]),
                     None,
                 )
                 .unwrap();
+
+            let mut layouts = Vec::with_capacity(6 + frame_count as usize);
+            layouts.extend_from_slice(&[
+                self.params_layout,
+                self.static_layout,
+                self.transmittance.ds_layout,
+                self.scattering.ds_layout,
+                self.scattering.ds_layout,
+                self.scattering.ds_layout,
+            ]);
+            for _ in 0..frame_count {
+                layouts.push(self.frame_layout);
+            }
 
             let mut descriptor_sets = self
                 .device
                 .allocate_descriptor_sets(
                     &vk::DescriptorSetAllocateInfo::builder()
                         .descriptor_pool(descriptor_pool)
-                        .set_layouts(&[
-                            self.params_layout,
-                            self.static_layout,
-                            self.transmittance.ds_layout,
-                            self.scattering.ds_layout,
-                            self.scattering.ds_layout,
-                            self.scattering.ds_layout,
-                        ]),
+                        .set_layouts(&layouts),
                 )
                 .unwrap()
                 .into_iter();
@@ -373,6 +409,7 @@ impl Builder {
             let scattering_ds = descriptor_sets.next().unwrap();
             let gathering_ds = descriptor_sets.next().unwrap();
             let multiscattering_ds = descriptor_sets.next().unwrap();
+            let frames = descriptor_sets.map(|ds| Frame { ds }).collect();
 
             let scattering_image_info = vk::ImageCreateInfo {
                 image_type: vk::ImageType::TYPE_3D,
@@ -926,11 +963,13 @@ impl Builder {
                 device: self.device.clone(),
                 inner: Some(Atmosphere {
                     device: self.device.clone(),
+                    h_atm: atmosphere_params.h_atm,
                     descriptor_pool,
                     scattering,
                     params,
                     params_mem,
                     ds: static_ds,
+                    frames,
                 }),
                 single_order,
                 gathered,
@@ -1062,8 +1101,7 @@ pub fn beta_rayleigh(ior: f32, molecular_density: f32, wavelength: f32) -> f32 {
 /// `molecular_density` - number of Mie particles (i.e. aerosols) per cubic meter at sea level
 /// `wavelength` - wavelength to compute β_R for
 pub fn beta_mie(ior: f32, particle_density: f32) -> f32 {
-    8.0 * std::f32::consts::PI.powi(3) * (ior.powi(2) - 1.0).powi(2)
-        / (3.0 * particle_density)
+    8.0 * std::f32::consts::PI.powi(3) * (ior.powi(2) - 1.0).powi(2) / (3.0 * particle_density)
 }
 
 impl Default for Params {
@@ -1180,11 +1218,13 @@ impl PendingAtmosphere {
 /// As with any Vulkan object, this must not be dropped while in use by a rendering operation.
 pub struct Atmosphere {
     device: Arc<Device>,
+    h_atm: f32,
     descriptor_pool: vk::DescriptorPool,
     scattering: Image,
     params: vk::Buffer,
     params_mem: vk::DeviceMemory,
     ds: vk::DescriptorSet,
+    frames: Vec<Frame>,
 }
 
 impl Drop for Atmosphere {
@@ -1201,23 +1241,51 @@ impl Drop for Atmosphere {
     }
 }
 
+impl Atmosphere {
+    pub unsafe fn set_depth_buffer(&mut self, frame: u32, depth: vk::ImageView) {
+        self.device.update_descriptor_sets(
+            &[
+                vk::WriteDescriptorSet {
+                    dst_set: self.frames[frame as usize].ds,
+                    dst_binding: 0,
+                    dst_array_element: 0,
+                    descriptor_count: 1,
+                    descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
+                    p_image_info: &vk::DescriptorImageInfo {
+                        sampler: vk::Sampler::null(),
+                        image_view: depth,
+                        image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    },
+                    ..Default::default()
+                },
+            ],
+            &[],
+        );
+    }
+}
+
 pub struct Renderer {
     device: Arc<Device>,
     sampler: vk::Sampler,
     vert_shader: vk::ShaderModule,
     frag_shader: vk::ShaderModule,
+    outside_frag_shader: vk::ShaderModule,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+    outside_pipeline: vk::Pipeline,
 }
 
 impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
             self.device.destroy_pipeline(self.pipeline, None);
+            self.device.destroy_pipeline(self.outside_pipeline, None);
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
             self.device.destroy_shader_module(self.vert_shader, None);
             self.device.destroy_shader_module(self.frag_shader, None);
+            self.device
+                .destroy_shader_module(self.outside_frag_shader, None);
             self.device.destroy_sampler(self.sampler, None);
         }
     }
@@ -1225,6 +1293,7 @@ impl Drop for Renderer {
 
 const FULLSCREEN_VERT: &[u32] = include_glsl!("shaders/fullscreen.vert");
 const INSIDE_FRAG: &[u32] = include_glsl!("shaders/inside.frag", debug);
+const OUTSIDE_FRAG: &[u32] = include_glsl!("shaders/outside.frag", debug);
 
 impl Renderer {
     /// Construct an atmosphere renderer
@@ -1235,6 +1304,7 @@ impl Renderer {
         cache: vk::PipelineCache,
         inverse_z: bool,
         render_pass: vk::RenderPass,
+        subpass: u32,
     ) -> Self {
         let device = builder.device.clone();
         unsafe {
@@ -1248,6 +1318,13 @@ impl Renderer {
             let frag_shader = device
                 .create_shader_module(
                     &vk::ShaderModuleCreateInfo::builder().code(&INSIDE_FRAG),
+                    None,
+                )
+                .unwrap();
+
+            let outside_frag_shader = device
+                .create_shader_module(
+                    &vk::ShaderModuleCreateInfo::builder().code(&OUTSIDE_FRAG),
                     None,
                 )
                 .unwrap();
@@ -1271,7 +1348,7 @@ impl Renderer {
             let pipeline_layout = device
                 .create_pipeline_layout(
                     &vk::PipelineLayoutCreateInfo::builder()
-                        .set_layouts(&[builder.static_layout])
+                        .set_layouts(&[builder.static_layout, builder.frame_layout])
                         .push_constant_ranges(&[vk::PushConstantRange {
                             stage_flags: vk::ShaderStageFlags::FRAGMENT,
                             offset: 0,
@@ -1291,101 +1368,182 @@ impl Renderer {
                 write_mask: 0,
                 reference: 0,
             };
-            let pipeline = device
+            let mut pipelines = device
                 .create_graphics_pipelines(
                     cache,
-                    &[vk::GraphicsPipelineCreateInfo::builder()
-                        .stages(&[
-                            vk::PipelineShaderStageCreateInfo {
-                                stage: vk::ShaderStageFlags::VERTEX,
-                                module: vert_shader,
-                                p_name: entry_point,
-                                p_specialization_info: &*vk::SpecializationInfo::builder()
-                                    .data(&(!inverse_z as u32 as f32).to_bits().to_ne_bytes())
-                                    .map_entries(&[vk::SpecializationMapEntry {
-                                        constant_id: 0,
-                                        offset: 0,
-                                        size: 4,
-                                    }]),
-                                ..Default::default()
-                            },
-                            vk::PipelineShaderStageCreateInfo {
-                                stage: vk::ShaderStageFlags::FRAGMENT,
-                                module: frag_shader,
-                                p_name: entry_point,
-                                ..Default::default()
-                            },
-                        ])
-                        .vertex_input_state(&Default::default())
-                        .input_assembly_state(
-                            &vk::PipelineInputAssemblyStateCreateInfo::builder()
-                                .topology(vk::PrimitiveTopology::TRIANGLE_LIST),
-                        )
-                        .viewport_state(
-                            &vk::PipelineViewportStateCreateInfo::builder()
-                                .scissor_count(1)
-                                .viewport_count(1),
-                        )
-                        .rasterization_state(
-                            &vk::PipelineRasterizationStateCreateInfo::builder()
-                                .cull_mode(vk::CullModeFlags::NONE)
-                                .polygon_mode(vk::PolygonMode::FILL)
-                                .line_width(1.0),
-                        )
-                        .multisample_state(
-                            &vk::PipelineMultisampleStateCreateInfo::builder()
-                                .rasterization_samples(vk::SampleCountFlags::TYPE_1),
-                        )
-                        .depth_stencil_state(
-                            &vk::PipelineDepthStencilStateCreateInfo::builder()
-                                .depth_test_enable(true)
-                                .depth_compare_op(if inverse_z {
-                                    vk::CompareOp::GREATER_OR_EQUAL
-                                } else {
-                                    vk::CompareOp::LESS_OR_EQUAL
-                                })
-                                .front(noop_stencil_state)
-                                .back(noop_stencil_state)
-                                .max_depth_bounds(inverse_z as u32 as f32)
-                                .min_depth_bounds((1 - inverse_z as u32) as f32),
-                        )
-                        .color_blend_state(
-                            &vk::PipelineColorBlendStateCreateInfo::builder().attachments(&[
-                                vk::PipelineColorBlendAttachmentState {
-                                    blend_enable: vk::TRUE,
-                                    src_color_blend_factor: vk::BlendFactor::ONE,
-                                    dst_color_blend_factor: vk::BlendFactor::ONE,
-                                    color_blend_op: vk::BlendOp::ADD,
-                                    src_alpha_blend_factor: vk::BlendFactor::ONE,
-                                    dst_alpha_blend_factor: vk::BlendFactor::ZERO,
-                                    alpha_blend_op: vk::BlendOp::ADD,
-                                    color_write_mask: vk::ColorComponentFlags::all(),
+                    &[
+                        vk::GraphicsPipelineCreateInfo::builder()
+                            .stages(&[
+                                vk::PipelineShaderStageCreateInfo {
+                                    stage: vk::ShaderStageFlags::VERTEX,
+                                    module: vert_shader,
+                                    p_name: entry_point,
+                                    p_specialization_info: &*vk::SpecializationInfo::builder()
+                                        .data(&(!inverse_z as u32 as f32).to_bits().to_ne_bytes())
+                                        .map_entries(&[vk::SpecializationMapEntry {
+                                            constant_id: 0,
+                                            offset: 0,
+                                            size: 4,
+                                        }]),
+                                    ..Default::default()
                                 },
-                            ]),
-                        )
-                        .dynamic_state(
-                            &vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&[
-                                vk::DynamicState::VIEWPORT,
-                                vk::DynamicState::SCISSOR,
-                            ]),
-                        )
-                        .layout(pipeline_layout)
-                        .render_pass(render_pass)
-                        .build()],
+                                vk::PipelineShaderStageCreateInfo {
+                                    stage: vk::ShaderStageFlags::FRAGMENT,
+                                    module: frag_shader,
+                                    p_name: entry_point,
+                                    ..Default::default()
+                                },
+                            ])
+                            .vertex_input_state(&Default::default())
+                            .input_assembly_state(
+                                &vk::PipelineInputAssemblyStateCreateInfo::builder()
+                                    .topology(vk::PrimitiveTopology::TRIANGLE_LIST),
+                            )
+                            .viewport_state(
+                                &vk::PipelineViewportStateCreateInfo::builder()
+                                    .scissor_count(1)
+                                    .viewport_count(1),
+                            )
+                            .rasterization_state(
+                                &vk::PipelineRasterizationStateCreateInfo::builder()
+                                    .cull_mode(vk::CullModeFlags::NONE)
+                                    .polygon_mode(vk::PolygonMode::FILL)
+                                    .line_width(1.0),
+                            )
+                            .multisample_state(
+                                &vk::PipelineMultisampleStateCreateInfo::builder()
+                                    .rasterization_samples(vk::SampleCountFlags::TYPE_1),
+                            )
+                            .depth_stencil_state(
+                                &vk::PipelineDepthStencilStateCreateInfo::builder()
+                                    .depth_test_enable(true)
+                                    .depth_compare_op(
+                                        if inverse_z {
+                                            vk::CompareOp::GREATER_OR_EQUAL
+                                        } else {
+                                            vk::CompareOp::LESS_OR_EQUAL
+                                        }
+                                    )
+                                    .front(noop_stencil_state)
+                                    .back(noop_stencil_state)
+                                    .max_depth_bounds(inverse_z as u32 as f32)
+                                    .min_depth_bounds((1 - inverse_z as u32) as f32),
+                            )
+                            .color_blend_state(
+                                &vk::PipelineColorBlendStateCreateInfo::builder().attachments(&[
+                                    vk::PipelineColorBlendAttachmentState {
+                                        blend_enable: vk::TRUE,
+                                        src_color_blend_factor: vk::BlendFactor::ONE,
+                                        dst_color_blend_factor: vk::BlendFactor::ZERO,
+                                        color_blend_op: vk::BlendOp::ADD,
+                                        src_alpha_blend_factor: vk::BlendFactor::ONE,
+                                        dst_alpha_blend_factor: vk::BlendFactor::ZERO,
+                                        alpha_blend_op: vk::BlendOp::ADD,
+                                        color_write_mask: vk::ColorComponentFlags::all(),
+                                    },
+                                ]),
+                            )
+                            .dynamic_state(
+                                &vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&[
+                                    vk::DynamicState::VIEWPORT,
+                                    vk::DynamicState::SCISSOR,
+                                ]),
+                            )
+                            .layout(pipeline_layout)
+                            .render_pass(render_pass)
+                            .subpass(subpass)
+                            .build(),
+                        // Outside view
+                        vk::GraphicsPipelineCreateInfo::builder()
+                            .stages(&[
+                                vk::PipelineShaderStageCreateInfo {
+                                    stage: vk::ShaderStageFlags::VERTEX,
+                                    module: vert_shader,
+                                    p_name: entry_point,
+                                    p_specialization_info: &*vk::SpecializationInfo::builder()
+                                        .data(&(inverse_z as u32 as f32).to_bits().to_ne_bytes())
+                                        .map_entries(&[vk::SpecializationMapEntry {
+                                            constant_id: 0,
+                                            offset: 0,
+                                            size: 4,
+                                        }]),
+                                    ..Default::default()
+                                },
+                                vk::PipelineShaderStageCreateInfo {
+                                    stage: vk::ShaderStageFlags::FRAGMENT,
+                                    module: outside_frag_shader,
+                                    p_name: entry_point,
+                                    ..Default::default()
+                                },
+                            ])
+                            .vertex_input_state(&Default::default())
+                            .input_assembly_state(
+                                &vk::PipelineInputAssemblyStateCreateInfo::builder()
+                                    .topology(vk::PrimitiveTopology::TRIANGLE_LIST),
+                            )
+                            .viewport_state(
+                                &vk::PipelineViewportStateCreateInfo::builder()
+                                    .scissor_count(1)
+                                    .viewport_count(1),
+                            )
+                            .rasterization_state(
+                                &vk::PipelineRasterizationStateCreateInfo::builder()
+                                    .cull_mode(vk::CullModeFlags::NONE)
+                                    .polygon_mode(vk::PolygonMode::FILL)
+                                    .line_width(1.0),
+                            )
+                            .multisample_state(
+                                &vk::PipelineMultisampleStateCreateInfo::builder()
+                                    .rasterization_samples(vk::SampleCountFlags::TYPE_1),
+                            )
+                            .depth_stencil_state(
+                                &vk::PipelineDepthStencilStateCreateInfo::builder()
+                                    .front(noop_stencil_state)
+                                    .back(noop_stencil_state)
+                                    .max_depth_bounds(inverse_z as u32 as f32)
+                                    .min_depth_bounds((1 - inverse_z as u32) as f32),
+                            )
+                            .color_blend_state(
+                                &vk::PipelineColorBlendStateCreateInfo::builder().attachments(&[
+                                    vk::PipelineColorBlendAttachmentState {
+                                        blend_enable: vk::TRUE,
+                                        src_color_blend_factor: vk::BlendFactor::ONE,
+                                        dst_color_blend_factor: vk::BlendFactor::ONE,
+                                        color_blend_op: vk::BlendOp::ADD,
+                                        src_alpha_blend_factor: vk::BlendFactor::ONE,
+                                        dst_alpha_blend_factor: vk::BlendFactor::ZERO,
+                                        alpha_blend_op: vk::BlendOp::ADD,
+                                        color_write_mask: vk::ColorComponentFlags::all(),
+                                    },
+                                ]),
+                            )
+                            .dynamic_state(
+                                &vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&[
+                                    vk::DynamicState::VIEWPORT,
+                                    vk::DynamicState::SCISSOR,
+                                ]),
+                            )
+                            .layout(pipeline_layout)
+                            .render_pass(render_pass)
+                            .subpass(subpass)
+                            .build(),
+                    ],
                     None,
                 )
                 .unwrap()
-                .into_iter()
-                .next()
-                .unwrap();
+                .into_iter();
+            let pipeline = pipelines.next().unwrap();
+            let outside_pipeline = pipelines.next().unwrap();
 
             Self {
                 device,
                 sampler,
                 vert_shader,
                 frag_shader,
+                outside_frag_shader,
                 pipeline_layout,
                 pipeline,
+                outside_pipeline,
             }
         }
     }
@@ -1396,16 +1554,18 @@ impl Renderer {
         atmosphere: &Atmosphere,
         params: &DrawParams,
         viewport: vk::Extent2D,
+        frame: u32,
     ) {
+        let inside = params.height < atmosphere.h_atm;
         unsafe {
             self.device
-                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, if inside { self.pipeline } else { self.outside_pipeline });
             self.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline_layout,
                 0,
-                &[atmosphere.ds],
+                &[atmosphere.ds, atmosphere.frames[frame as usize].ds],
                 &[],
             );
             self.device.cmd_push_constants(
@@ -1439,6 +1599,10 @@ impl Renderer {
             self.device.cmd_draw(cmd, 3, 1, 0, 0);
         }
     }
+}
+
+pub struct Frame {
+    ds: vk::DescriptorSet,
 }
 
 #[repr(C)]
