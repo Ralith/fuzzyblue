@@ -1253,7 +1253,7 @@ impl Atmosphere {
                     p_image_info: &vk::DescriptorImageInfo {
                         sampler: vk::Sampler::null(),
                         image_view: depth,
-                        image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        image_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
                     },
                     ..Default::default()
                 },
