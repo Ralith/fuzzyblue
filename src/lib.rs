@@ -161,6 +161,13 @@ impl Builder {
                             stage_flags: vk::ShaderStageFlags::FRAGMENT,
                             p_immutable_samplers: &sampler,
                         },
+                        vk::DescriptorSetLayoutBinding {
+                            binding: 2,
+                            descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                            descriptor_count: 1,
+                            stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                            p_immutable_samplers: &sampler,
+                        },
                     ]),
                     None,
                 )
@@ -351,7 +358,7 @@ impl Builder {
             // multiscattering: 1 sampled image, 2 storage image
             // ====
             // 1 uniform, 3 sampled images, 7 storage images for precompute
-            // + 1 uniform, 1 sampled image for static descriptor set
+            // + 1 uniform, 2 sampled images for static descriptor set
             // + 1 input attachment per frame for dynamic descriptor sets
             let descriptor_pool = self
                 .device
@@ -365,7 +372,7 @@ impl Builder {
                             },
                             vk::DescriptorPoolSize {
                                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                                descriptor_count: 4,
+                                descriptor_count: 5,
                             },
                             vk::DescriptorPoolSize {
                                 ty: vk::DescriptorType::STORAGE_IMAGE,
@@ -445,7 +452,7 @@ impl Builder {
             let gathered = self.alloc_image(&gathering_image_info);
             let gathered_sum = self.alloc_image(&gathering_image_info);
 
-            let transmittance_lut = self.alloc_image(&vk::ImageCreateInfo {
+            let transmittance = self.alloc_image(&vk::ImageCreateInfo {
                 image_type: vk::ImageType::TYPE_2D,
                 format: vk::Format::R16G16B16A16_SFLOAT,
                 extent: vk::Extent3D {
@@ -520,6 +527,19 @@ impl Builder {
                         ..Default::default()
                     },
                     vk::WriteDescriptorSet {
+                        dst_set: static_ds,
+                        dst_binding: 2,
+                        dst_array_element: 0,
+                        descriptor_count: 1,
+                        descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                        p_image_info: &vk::DescriptorImageInfo {
+                            sampler: vk::Sampler::null(),
+                            image_view: transmittance.view,
+                            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        },
+                        ..Default::default()
+                    },
+                    vk::WriteDescriptorSet {
                         dst_set: params_ds,
                         dst_binding: 0,
                         dst_array_element: 0,
@@ -540,7 +560,7 @@ impl Builder {
                         descriptor_type: vk::DescriptorType::STORAGE_IMAGE,
                         p_image_info: &vk::DescriptorImageInfo {
                             sampler: vk::Sampler::null(),
-                            image_view: transmittance_lut.view,
+                            image_view: transmittance.view,
                             image_layout: vk::ImageLayout::GENERAL,
                         },
                         ..Default::default()
@@ -553,7 +573,7 @@ impl Builder {
                         descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                         p_image_info: &vk::DescriptorImageInfo {
                             sampler: vk::Sampler::null(),
-                            image_view: transmittance_lut.view,
+                            image_view: transmittance.view,
                             image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                         },
                         ..Default::default()
@@ -758,7 +778,7 @@ impl Builder {
                 }],
                 &[
                     vk::ImageMemoryBarrier {
-                        image: transmittance_lut.handle,
+                        image: transmittance.handle,
                         ..init_barrier
                     },
                     vk::ImageMemoryBarrier {
@@ -808,7 +828,7 @@ impl Builder {
                 &[],
                 &[],
                 &[vk::ImageMemoryBarrier {
-                    image: transmittance_lut.handle,
+                    image: transmittance.handle,
                     ..write_read_barrier
                 }],
             );
@@ -965,6 +985,7 @@ impl Builder {
                     h_atm: atmosphere_params.h_atm,
                     descriptor_pool,
                     scattering,
+                    transmittance,
                     params,
                     params_mem,
                     ds: static_ds,
@@ -973,7 +994,6 @@ impl Builder {
                 single_order,
                 gathered,
                 gathered_sum,
-                transmittance_lut,
             }
         }
     }
@@ -1140,7 +1160,6 @@ pub struct PendingAtmosphere {
     single_order: Image,
     gathered: Image,
     gathered_sum: Image,
-    transmittance_lut: Image,
 }
 
 impl Drop for PendingAtmosphere {
@@ -1150,7 +1169,6 @@ impl Drop for PendingAtmosphere {
                 &self.single_order,
                 &self.gathered,
                 &self.gathered_sum,
-                &self.transmittance_lut,
             ] {
                 self.device.destroy_image_view(image.view, None);
                 self.device.destroy_image(image.handle, None);
@@ -1220,6 +1238,7 @@ pub struct Atmosphere {
     h_atm: f32,
     descriptor_pool: vk::DescriptorPool,
     scattering: Image,
+    transmittance: Image,
     params: vk::Buffer,
     params_mem: vk::DeviceMemory,
     ds: vk::DescriptorSet,
@@ -1234,6 +1253,9 @@ impl Drop for Atmosphere {
             self.device.destroy_image_view(self.scattering.view, None);
             self.device.destroy_image(self.scattering.handle, None);
             self.device.free_memory(self.scattering.memory, None);
+            self.device.destroy_image_view(self.transmittance.view, None);
+            self.device.destroy_image(self.transmittance.handle, None);
+            self.device.free_memory(self.transmittance.memory, None);
             self.device.destroy_buffer(self.params, None);
             self.device.free_memory(self.params_mem, None);
         }
@@ -1296,8 +1318,6 @@ const OUTSIDE_FRAG: &[u32] = include_glsl!("shaders/outside.frag", debug);
 
 impl Renderer {
     /// Construct an atmosphere renderer
-    ///
-    /// `inverse_z` indicates whether points distant from the camera have depth value 1.0
     pub fn new(
         builder: &Builder,
         cache: vk::PipelineCache,
@@ -1377,13 +1397,6 @@ impl Renderer {
                                     stage: vk::ShaderStageFlags::VERTEX,
                                     module: vert_shader,
                                     p_name: entry_point,
-                                    p_specialization_info: &*vk::SpecializationInfo::builder()
-                                        .data(&(!inverse_z as u32 as f32).to_bits().to_ne_bytes())
-                                        .map_entries(&[vk::SpecializationMapEntry {
-                                            constant_id: 0,
-                                            offset: 0,
-                                            size: 4,
-                                        }]),
                                     ..Default::default()
                                 },
                                 vk::PipelineShaderStageCreateInfo {
@@ -1415,18 +1428,8 @@ impl Renderer {
                             )
                             .depth_stencil_state(
                                 &vk::PipelineDepthStencilStateCreateInfo::builder()
-                                    .depth_test_enable(true)
-                                    .depth_compare_op(
-                                        if inverse_z {
-                                            vk::CompareOp::GREATER_OR_EQUAL
-                                        } else {
-                                            vk::CompareOp::LESS_OR_EQUAL
-                                        }
-                                    )
                                     .front(noop_stencil_state)
-                                    .back(noop_stencil_state)
-                                    .max_depth_bounds(inverse_z as u32 as f32)
-                                    .min_depth_bounds((1 - inverse_z as u32) as f32),
+                                    .back(noop_stencil_state),
                             )
                             .color_blend_state(
                                 &vk::PipelineColorBlendStateCreateInfo::builder().attachments(&[
@@ -1459,13 +1462,6 @@ impl Renderer {
                                     stage: vk::ShaderStageFlags::VERTEX,
                                     module: vert_shader,
                                     p_name: entry_point,
-                                    p_specialization_info: &*vk::SpecializationInfo::builder()
-                                        .data(&(inverse_z as u32 as f32).to_bits().to_ne_bytes())
-                                        .map_entries(&[vk::SpecializationMapEntry {
-                                            constant_id: 0,
-                                            offset: 0,
-                                            size: 4,
-                                        }]),
                                     ..Default::default()
                                 },
                                 vk::PipelineShaderStageCreateInfo {
@@ -1498,9 +1494,7 @@ impl Renderer {
                             .depth_stencil_state(
                                 &vk::PipelineDepthStencilStateCreateInfo::builder()
                                     .front(noop_stencil_state)
-                                    .back(noop_stencil_state)
-                                    .max_depth_bounds(inverse_z as u32 as f32)
-                                    .min_depth_bounds((1 - inverse_z as u32) as f32),
+                                    .back(noop_stencil_state),
                             )
                             .color_blend_state(
                                 &vk::PipelineColorBlendStateCreateInfo::builder().attachments(&[

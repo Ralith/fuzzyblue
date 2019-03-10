@@ -8,6 +8,7 @@ layout (location = 0) out vec4 f_color;
 #include "params.h"
 
 layout (set = 0, binding = 1) uniform sampler3D scattering;
+layout (set = 0, binding = 2) uniform sampler2D transmittance;
 layout (set = 1, input_attachment_index = 0, binding = 0) uniform subpassInput depth;
 
 #include "inscattering.h"
@@ -22,7 +23,6 @@ bool ray_sphere(vec3 pos, vec3 dir, float radius, out float t) {
     if (delta < 0) { return false; }
     float t1 = (-b + sqrt(delta)) / (2 * a);
     t = (-b - sqrt(delta)) / (2 * a);
-    //t = min(t1, t2);
     return t > 0;
 }
 
@@ -34,8 +34,15 @@ void main() {
     if (ray_sphere(camera_pos, view, R_planet + H_atm, t)) {
         vec3 hit_pos = camera_pos + t * view;
         vec3 hit_zenith = normalize(hit_pos);
-        vec3 s = solar_irradiance * inscattering(scattering, view, hit_zenith, H_atm, sun_direction, mie_anisotropy);
-        f_color = vec4(s, 1);
+        vec4 iabtab = inscattering(scattering, view, hit_zenith, H_atm, sun_direction);
+        vec4 world_pre = (inverse_viewproj * vec4(2*screen - 1, subpassLoad(depth).x, 1));
+        vec3 world = world_pre.xyz / world_pre.w;
+        vec3 world_zenith = normalize(world);
+        float world_height = length(world) - R_planet;
+        vec4 isbtsb = inscattering(scattering, view, world_zenith, world_height, sun_direction);
+        vec3 tas = texture(transmittance, vec2(height_to_coord(world_height), cos_view_to_coord(world_height, dot(world_zenith, -view)))).rgb;
+        vec4 iastas = max(iabtab - tas.rgbr * isbtsb, vec4(0));
+        f_color = vec4(solar_irradiance * inscattering_ratios(iastas, view, sun_direction, mie_anisotropy), 1);
     } else {
         f_color = vec4(0);
     }

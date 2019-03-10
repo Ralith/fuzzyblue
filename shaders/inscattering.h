@@ -9,11 +9,14 @@ float phase_m(float cos_theta, float g) {
         * (1 + cos_theta * cos_theta) / pow(1 + g * g - 2 * g * cos_theta, 1.5);
 }
 
-vec3 inscattering(sampler3D lut, vec3 view, vec3 zenith, float height, vec3 sun_direction, float g) {
+vec4 inscattering(sampler3D lut, vec3 view, vec3 zenith, float height, vec3 sun_direction) {
     float cos_view = dot(view, zenith);
     float cos_sun = dot(sun_direction, zenith);
     vec3 coords = vec3(height_to_coord(height), cos_view_to_coord(height, cos_view), cos_sun_to_coord(cos_sun));
-    vec4 value = texture(lut, coords);
+    return texture(lut, coords);
+}
+
+vec3 inscattering_ratios(vec4 value, vec3 view, vec3 sun_direction, float g) {
     vec3 rayleigh = value.rgb;
     vec3 mie;
     if (value.r < 0.0001) {
