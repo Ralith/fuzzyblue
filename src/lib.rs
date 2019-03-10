@@ -16,8 +16,8 @@ const MULTISCATTERING: &[u32] = include_glsl!("shaders/multiscattering.comp", de
 
 const SCATTERING_EXTENT: vk::Extent3D = vk::Extent3D {
     width: 32,
-    height: 64,
-    depth: 32,
+    height: 128,
+    depth: 64,
 };
 const TRANSMITTANCE_EXTENT: vk::Extent2D = vk::Extent2D {
     width: 32,
