@@ -1,4 +1,4 @@
-// View from inside the atmosphere
+// View of the sky from inside the atmosphere
 #version 450
 
 layout (location = 0) in vec2 screen;

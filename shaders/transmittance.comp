@@ -31,8 +31,9 @@ void main() {
     float total_o = 0;
     for (int step = 0; step < STEPS; ++step) {
         vec2 s = p_a + step_size * step * dir;
-        float m = density_m(point_height(s));
-        float r = density_r(point_height(s));
+        float h = point_height(s);
+        float m = density_m(h);
+        float r = density_r(h);
         float o = 6e-7 * r;
         total_m += step_size * (m + prev_m) / 2;
         total_r += step_size * (r + prev_r) / 2;
