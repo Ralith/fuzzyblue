@@ -7,4 +7,5 @@ layout(set = 0, binding = 0) uniform Params {
     float beta_m;
     vec3 beta_e_o;
     float beta_e_m;
+    float max_ap_depth;
 };

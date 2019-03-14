@@ -9,10 +9,10 @@ use ash::version::{DeviceV1_0, InstanceV1_0};
 use ash::{vk, Device, Instance};
 use vk_shader_macros::include_glsl;
 
-const TRANSMITTANCE: &[u32] = include_glsl!("shaders/transmittance.comp", debug);
-const SCATTERING: &[u32] = include_glsl!("shaders/scattering.comp", debug);
-const GATHERING: &[u32] = include_glsl!("shaders/gathering.comp", debug);
-const MULTISCATTERING: &[u32] = include_glsl!("shaders/multiscattering.comp", debug);
+const TRANSMITTANCE: &[u32] = include_glsl!("shaders/transmittance.comp");
+const SCATTERING: &[u32] = include_glsl!("shaders/scattering.comp");
+const GATHERING: &[u32] = include_glsl!("shaders/gathering.comp");
+const MULTISCATTERING: &[u32] = include_glsl!("shaders/multiscattering.comp");
 
 const SCATTERING_EXTENT: vk::Extent3D = vk::Extent3D {
     width: 32,
@@ -27,6 +27,11 @@ const GATHERING_EXTENT: vk::Extent2D = vk::Extent2D {
     width: 32,
     height: 32,
 };
+const AERIAL_PERSPECTIVE_EXTENT: vk::Extent3D = vk::Extent3D {
+    width: 32,
+    height: 32,
+    depth: 16,
+};
 
 /// Order of scattering to compute
 const ORDER: usize = 4;
@@ -40,10 +45,14 @@ pub struct Builder {
     gfx_queue_family: u32,
     compute_queue_family: Option<u32>,
     sampler: vk::Sampler,
+    /// Aerial perspective scattering table sampler
+    ap_scattering_sampler: vk::Sampler,
+    /// Aerial perspective transmittance table sampler
+    ap_transmittance_sampler: vk::Sampler,
     params_layout: vk::DescriptorSetLayout,
-    /// Layout of per-atmosphere descriptor sets
+    /// Layout of per-atmosphere descriptor sets; set 0 when drawing
     static_layout: vk::DescriptorSetLayout,
-    /// Layout of per-atmosphere per-frame descriptor sets
+    /// Layout of per-atmosphere per-frame descriptor sets; set 1 when drawing
     frame_layout: vk::DescriptorSetLayout,
     transmittance: Pass,
     scattering: Pass,
@@ -80,6 +89,10 @@ impl Drop for Builder {
                 .destroy_shader_module(self.multiscattering_shader, None);
             self.device.destroy_sampler(self.sampler, None);
             self.device
+                .destroy_sampler(self.ap_scattering_sampler, None);
+            self.device
+                .destroy_sampler(self.ap_transmittance_sampler, None);
+            self.device
                 .destroy_descriptor_set_layout(self.params_layout, None);
             self.device
                 .destroy_descriptor_set_layout(self.static_layout, None);
@@ -114,21 +127,6 @@ impl Builder {
                 )
                 .unwrap();
 
-            let frame_layout = device
-                .create_descriptor_set_layout(
-                    &vk::DescriptorSetLayoutCreateInfo::builder().bindings(&[
-                        vk::DescriptorSetLayoutBinding {
-                            binding: 0,
-                            descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-                            descriptor_count: 1,
-                            stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                            p_immutable_samplers: ptr::null(),
-                        },
-                    ]),
-                    None,
-                )
-                .unwrap();
-
             let sampler = device
                 .create_sampler(
                     &vk::SamplerCreateInfo {
@@ -144,12 +142,87 @@ impl Builder {
                 )
                 .unwrap();
 
+            let ap_scattering_sampler = device
+                .create_sampler(
+                    &vk::SamplerCreateInfo {
+                        min_filter: vk::Filter::LINEAR,
+                        mag_filter: vk::Filter::LINEAR,
+                        mipmap_mode: vk::SamplerMipmapMode::NEAREST,
+                        address_mode_u: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                        address_mode_v: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                        address_mode_w: vk::SamplerAddressMode::CLAMP_TO_BORDER,
+                        border_color: vk::BorderColor::FLOAT_TRANSPARENT_BLACK,
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .unwrap();
+
+            let ap_transmittance_sampler = device
+                .create_sampler(
+                    &vk::SamplerCreateInfo {
+                        min_filter: vk::Filter::LINEAR,
+                        mag_filter: vk::Filter::LINEAR,
+                        mipmap_mode: vk::SamplerMipmapMode::NEAREST,
+                        address_mode_u: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                        address_mode_v: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                        address_mode_w: vk::SamplerAddressMode::CLAMP_TO_BORDER,
+                        border_color: vk::BorderColor::FLOAT_OPAQUE_WHITE,
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .unwrap();
+
             let static_layout = device
+                .create_descriptor_set_layout(
+                    &vk::DescriptorSetLayoutCreateInfo::builder().bindings(&[
+                        // Parameters
+                        vk::DescriptorSetLayoutBinding {
+                            binding: 0,
+                            descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+                            descriptor_count: 1,
+                            stage_flags: vk::ShaderStageFlags::FRAGMENT
+                                | vk::ShaderStageFlags::COMPUTE,
+                            p_immutable_samplers: ptr::null(),
+                        },
+                        // Inscattering
+                        vk::DescriptorSetLayoutBinding {
+                            binding: 1,
+                            descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                            descriptor_count: 1,
+                            stage_flags: vk::ShaderStageFlags::FRAGMENT
+                                | vk::ShaderStageFlags::COMPUTE,
+                            p_immutable_samplers: &sampler,
+                        },
+                        // Transmittance to atmosphere
+                        vk::DescriptorSetLayoutBinding {
+                            binding: 2,
+                            descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                            descriptor_count: 1,
+                            stage_flags: vk::ShaderStageFlags::FRAGMENT
+                                | vk::ShaderStageFlags::COMPUTE,
+                            p_immutable_samplers: &sampler,
+                        },
+                        // Gathered sum
+                        vk::DescriptorSetLayoutBinding {
+                            binding: 3,
+                            descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                            descriptor_count: 1,
+                            stage_flags: vk::ShaderStageFlags::COMPUTE,
+                            p_immutable_samplers: &sampler,
+                        },
+                    ]),
+                    None,
+                )
+                .unwrap();
+
+            let frame_layout = device
                 .create_descriptor_set_layout(
                     &vk::DescriptorSetLayoutCreateInfo::builder().bindings(&[
                         vk::DescriptorSetLayoutBinding {
                             binding: 0,
-                            descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+                            descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
                             descriptor_count: 1,
                             stage_flags: vk::ShaderStageFlags::FRAGMENT,
                             p_immutable_samplers: ptr::null(),
@@ -159,7 +232,28 @@ impl Builder {
                             descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                             descriptor_count: 1,
                             stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                            p_immutable_samplers: &sampler,
+                            p_immutable_samplers: &ap_scattering_sampler,
+                        },
+                        vk::DescriptorSetLayoutBinding {
+                            binding: 2,
+                            descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                            descriptor_count: 1,
+                            stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                            p_immutable_samplers: &ap_transmittance_sampler,
+                        },
+                        vk::DescriptorSetLayoutBinding {
+                            binding: 3,
+                            descriptor_type: vk::DescriptorType::STORAGE_IMAGE,
+                            descriptor_count: 1,
+                            stage_flags: vk::ShaderStageFlags::COMPUTE,
+                            p_immutable_samplers: ptr::null(),
+                        },
+                        vk::DescriptorSetLayoutBinding {
+                            binding: 4,
+                            descriptor_type: vk::DescriptorType::STORAGE_IMAGE,
+                            descriptor_count: 1,
+                            stage_flags: vk::ShaderStageFlags::COMPUTE,
+                            p_immutable_samplers: ptr::null(),
                         },
                     ]),
                     None,
@@ -323,6 +417,8 @@ impl Builder {
                 gfx_queue_family,
                 compute_queue_family,
                 sampler,
+                ap_scattering_sampler,
+                ap_transmittance_sampler,
                 params_layout,
                 static_layout,
                 frame_layout,
@@ -351,8 +447,8 @@ impl Builder {
             // multiscattering: 1 sampled image, 2 storage image
             // ====
             // 1 uniform, 3 sampled images, 7 storage images for precompute
-            // + 1 uniform, 1 sampled image for static descriptor set
-            // + 1 input attachment per frame for dynamic descriptor sets
+            // + 1 uniform, 3 sampled image for static descriptor set
+            // + 1 input attachment, 2 sampled images, 2 storage images per frame for dynamic descriptor sets
             let descriptor_pool = self
                 .device
                 .create_descriptor_pool(
@@ -365,11 +461,11 @@ impl Builder {
                             },
                             vk::DescriptorPoolSize {
                                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                                descriptor_count: 4,
+                                descriptor_count: 6 + 2 * frame_count,
                             },
                             vk::DescriptorPoolSize {
                                 ty: vk::DescriptorType::STORAGE_IMAGE,
-                                descriptor_count: 7,
+                                descriptor_count: 7 + 2 * frame_count,
                             },
                             vk::DescriptorPoolSize {
                                 ty: vk::DescriptorType::INPUT_ATTACHMENT,
@@ -408,7 +504,101 @@ impl Builder {
             let scattering_ds = descriptor_sets.next().unwrap();
             let gathering_ds = descriptor_sets.next().unwrap();
             let multiscattering_ds = descriptor_sets.next().unwrap();
-            let frames = descriptor_sets.map(|ds| Frame { ds }).collect();
+            let frames = descriptor_sets
+                .map(|ds| {
+                    let ap_scattering = self.alloc_image(&vk::ImageCreateInfo {
+                        image_type: vk::ImageType::TYPE_3D,
+                        format: vk::Format::R16G16B16A16_SFLOAT,
+                        extent: AERIAL_PERSPECTIVE_EXTENT,
+                        mip_levels: 1,
+                        array_layers: 1,
+                        samples: vk::SampleCountFlags::TYPE_1,
+                        tiling: vk::ImageTiling::OPTIMAL,
+                        usage: vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+                        sharing_mode: vk::SharingMode::EXCLUSIVE,
+                        initial_layout: vk::ImageLayout::UNDEFINED,
+                        ..Default::default()
+                    });
+
+                    let ap_transmittance = self.alloc_image(&vk::ImageCreateInfo {
+                        image_type: vk::ImageType::TYPE_3D,
+                        format: vk::Format::R16G16B16A16_SFLOAT,
+                        extent: AERIAL_PERSPECTIVE_EXTENT,
+                        mip_levels: 1,
+                        array_layers: 1,
+                        samples: vk::SampleCountFlags::TYPE_1,
+                        tiling: vk::ImageTiling::OPTIMAL,
+                        usage: vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+                        sharing_mode: vk::SharingMode::EXCLUSIVE,
+                        initial_layout: vk::ImageLayout::UNDEFINED,
+                        ..Default::default()
+                    });
+
+                    self.device.update_descriptor_sets(
+                        &[
+                            vk::WriteDescriptorSet {
+                                dst_set: ds,
+                                dst_binding: 1,
+                                dst_array_element: 0,
+                                descriptor_count: 1,
+                                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                                p_image_info: &vk::DescriptorImageInfo {
+                                    sampler: vk::Sampler::null(),
+                                    image_view: ap_scattering.view,
+                                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                                },
+                                ..Default::default()
+                            },
+                            vk::WriteDescriptorSet {
+                                dst_set: ds,
+                                dst_binding: 2,
+                                dst_array_element: 0,
+                                descriptor_count: 1,
+                                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                                p_image_info: &vk::DescriptorImageInfo {
+                                    sampler: vk::Sampler::null(),
+                                    image_view: ap_transmittance.view,
+                                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                                },
+                                ..Default::default()
+                            },
+                            vk::WriteDescriptorSet {
+                                dst_set: ds,
+                                dst_binding: 3,
+                                dst_array_element: 0,
+                                descriptor_count: 1,
+                                descriptor_type: vk::DescriptorType::STORAGE_IMAGE,
+                                p_image_info: &vk::DescriptorImageInfo {
+                                    sampler: vk::Sampler::null(),
+                                    image_view: ap_scattering.view,
+                                    image_layout: vk::ImageLayout::GENERAL,
+                                },
+                                ..Default::default()
+                            },
+                            vk::WriteDescriptorSet {
+                                dst_set: ds,
+                                dst_binding: 4,
+                                dst_array_element: 0,
+                                descriptor_count: 1,
+                                descriptor_type: vk::DescriptorType::STORAGE_IMAGE,
+                                p_image_info: &vk::DescriptorImageInfo {
+                                    sampler: vk::Sampler::null(),
+                                    image_view: ap_transmittance.view,
+                                    image_layout: vk::ImageLayout::GENERAL,
+                                },
+                                ..Default::default()
+                            },
+                        ],
+                        &[],
+                    );
+
+                    Frame {
+                        ds,
+                        ap_scattering,
+                        ap_transmittance,
+                    }
+                })
+                .collect();
 
             let scattering_image_info = vk::ImageCreateInfo {
                 image_type: vk::ImageType::TYPE_3D,
@@ -515,6 +705,32 @@ impl Builder {
                         p_image_info: &vk::DescriptorImageInfo {
                             sampler: vk::Sampler::null(),
                             image_view: scattering.view,
+                            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        },
+                        ..Default::default()
+                    },
+                    vk::WriteDescriptorSet {
+                        dst_set: static_ds,
+                        dst_binding: 2,
+                        dst_array_element: 0,
+                        descriptor_count: 1,
+                        descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                        p_image_info: &vk::DescriptorImageInfo {
+                            sampler: vk::Sampler::null(),
+                            image_view: transmittance_lut.view,
+                            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        },
+                        ..Default::default()
+                    },
+                    vk::WriteDescriptorSet {
+                        dst_set: static_ds,
+                        dst_binding: 3,
+                        dst_array_element: 0,
+                        descriptor_count: 1,
+                        descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                        p_image_info: &vk::DescriptorImageInfo {
+                            sampler: vk::Sampler::null(),
+                            image_view: gathered_sum.view,
                             image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                         },
                         ..Default::default()
@@ -738,7 +954,7 @@ impl Builder {
                 cmd,
                 params,
                 0,
-                &mem::transmute::<_, [u8; 48]>(*atmosphere_params),
+                &mem::transmute::<_, [u8; 52]>(*atmosphere_params),
             );
             self.device.cmd_pipeline_barrier(
                 cmd,
@@ -965,6 +1181,8 @@ impl Builder {
                     h_atm: atmosphere_params.h_atm,
                     descriptor_pool,
                     scattering,
+                    gathered_sum,
+                    transmittance: transmittance_lut,
                     params,
                     params_mem,
                     ds: static_ds,
@@ -972,8 +1190,6 @@ impl Builder {
                 }),
                 single_order,
                 gathered,
-                gathered_sum,
-                transmittance_lut,
             }
         }
     }
@@ -1049,17 +1265,30 @@ pub struct Params {
     pub h_m: f32,
     /// Rayleigh scattering coefficients for each color's wavelength (m^-1)
     ///
+    /// The proportion of light scattered by gas molecules, i.e. particles of diameter much smaller
+    /// than the wavelength of incoming light. Rayleigh scattering is sensitive to light's
+    /// wavelength, so a separate value must be supplied for each wavelength being modeled.
+    ///
     /// On Earth, Rayleigh scattering is responsible for blue skies and red sunsets, both due to the
     /// relatively high proportion of blue light which it scatters.
     pub beta_r: [f32; 3],
     /// Mie scattering coefficient (m^-1)
     ///
-    /// Mie scattering produces a white halo around the sun.
+    /// The proportion of light scattered by aerosols, i.e. particles of diameter similar or larger
+    /// than the wavelength of incoming light. Mie scattering is relatively insensitive to
+    /// wavelength.
+    ///
+    /// On Earth, Mie scattering produces the white halo around the sun.
     pub beta_m: f32,
     /// Extinction coefficient due to ozone
     pub beta_e_o: [f32; 3],
-    /// Mie extinction coefficient, i.e. scattering + absorbtion
+    /// Mie extinction coefficient
+    ///
+    /// The proportion of light absorbed (i.e. neither scattered nor transmitted) by aerosols.
     pub beta_e_m: f32,
+    /// Maximum depth for aerial perspective. Should be 2*sqrt((R_planet + H_atm)^2 - R_planet^2),
+    /// though very dense atmospheres may benefit from a lower value.
+    pub max_ap_depth: f32,
 }
 
 /// Average index of refraction Earth's atmosphere, used to compute `Params::default().beta_r`
@@ -1075,6 +1304,11 @@ pub const LAMBDA_R: f32 = 680e-9;
 pub const LAMBDA_G: f32 = 550e-9;
 /// blue wavelength, used to compute `Params::default().beta_r[2]`
 pub const LAMBDA_B: f32 = 440e-9;
+
+/// Radius of the Earth
+pub const R_EARTH: f32 = 6371e3;
+/// Height of the Earth's atmosphere above sea level
+pub const H_ATM_EARTH: f32 = 80_000.0;
 
 /// Extinction coefficients for Ozone on Earth
 ///
@@ -1112,14 +1346,15 @@ impl Default for Params {
         let beta_m = 2.2e-5;
         let beta_e_m = beta_m / 0.9;
         Self {
-            h_atm: 80_000.0,
-            r_planet: 6371e3,
+            h_atm: H_ATM_EARTH,
+            r_planet: R_EARTH,
             h_r: 8_000.0,
             h_m: 1_200.0,
             beta_r: [r, g, b],
             beta_m,
             beta_e_o: OZONE_EXTINCTION_COEFFICIENT,
             beta_e_m,
+            max_ap_depth: 2.0 * ((R_EARTH + H_ATM_EARTH).powi(2) - R_EARTH.powi(2)).sqrt(),
         }
     }
 }
@@ -1139,19 +1374,12 @@ pub struct PendingAtmosphere {
     inner: Option<Atmosphere>,
     single_order: Image,
     gathered: Image,
-    gathered_sum: Image,
-    transmittance_lut: Image,
 }
 
 impl Drop for PendingAtmosphere {
     fn drop(&mut self) {
         unsafe {
-            for &image in &[
-                &self.single_order,
-                &self.gathered,
-                &self.gathered_sum,
-                &self.transmittance_lut,
-            ] {
+            for &image in &[&self.single_order, &self.gathered] {
                 self.device.destroy_image_view(image.view, None);
                 self.device.destroy_image(image.handle, None);
                 self.device.free_memory(image.memory, None);
@@ -1220,6 +1448,8 @@ pub struct Atmosphere {
     h_atm: f32,
     descriptor_pool: vk::DescriptorPool,
     scattering: Image,
+    gathered_sum: Image,
+    transmittance: Image,
     params: vk::Buffer,
     params_mem: vk::DeviceMemory,
     ds: vk::DescriptorSet,
@@ -1229,11 +1459,20 @@ pub struct Atmosphere {
 impl Drop for Atmosphere {
     fn drop(&mut self) {
         unsafe {
+            for frame in &self.frames {
+                for image in &[&frame.ap_scattering, &frame.ap_transmittance] {
+                    self.device.destroy_image_view(image.view, None);
+                    self.device.destroy_image(image.handle, None);
+                    self.device.free_memory(image.memory, None);
+                }
+            }
             self.device
                 .destroy_descriptor_pool(self.descriptor_pool, None);
-            self.device.destroy_image_view(self.scattering.view, None);
-            self.device.destroy_image(self.scattering.handle, None);
-            self.device.free_memory(self.scattering.memory, None);
+            for &image in &[&self.scattering, &self.gathered_sum, &self.transmittance] {
+                self.device.destroy_image_view(image.view, None);
+                self.device.destroy_image(image.handle, None);
+                self.device.free_memory(image.memory, None);
+            }
             self.device.destroy_buffer(self.params, None);
             self.device.free_memory(self.params_mem, None);
         }
@@ -1243,35 +1482,36 @@ impl Drop for Atmosphere {
 impl Atmosphere {
     pub unsafe fn set_depth_buffer(&mut self, frame: u32, depth: vk::ImageView) {
         self.device.update_descriptor_sets(
-            &[
-                vk::WriteDescriptorSet {
-                    dst_set: self.frames[frame as usize].ds,
-                    dst_binding: 0,
-                    dst_array_element: 0,
-                    descriptor_count: 1,
-                    descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-                    p_image_info: &vk::DescriptorImageInfo {
-                        sampler: vk::Sampler::null(),
-                        image_view: depth,
-                        image_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-                    },
-                    ..Default::default()
+            &[vk::WriteDescriptorSet {
+                dst_set: self.frames[frame as usize].ds,
+                dst_binding: 0,
+                dst_array_element: 0,
+                descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
+                p_image_info: &vk::DescriptorImageInfo {
+                    sampler: vk::Sampler::null(),
+                    image_view: depth,
+                    image_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
                 },
-            ],
+                ..Default::default()
+            }],
             &[],
         );
     }
 }
 
+/// Atmosphere renderer
+///
+/// Requires that dual-source blending be enabled on the Vulkan device.
 pub struct Renderer {
     device: Arc<Device>,
     sampler: vk::Sampler,
-    vert_shader: vk::ShaderModule,
-    frag_shader: vk::ShaderModule,
-    outside_frag_shader: vk::ShaderModule,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
     outside_pipeline: vk::Pipeline,
+    // Aerial perspective
+    ap_compute: vk::Pipeline,
+    ap_draw: vk::Pipeline,
 }
 
 impl Drop for Renderer {
@@ -1279,20 +1519,20 @@ impl Drop for Renderer {
         unsafe {
             self.device.destroy_pipeline(self.pipeline, None);
             self.device.destroy_pipeline(self.outside_pipeline, None);
+            self.device.destroy_pipeline(self.ap_compute, None);
+            self.device.destroy_pipeline(self.ap_draw, None);
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
-            self.device.destroy_shader_module(self.vert_shader, None);
-            self.device.destroy_shader_module(self.frag_shader, None);
-            self.device
-                .destroy_shader_module(self.outside_frag_shader, None);
             self.device.destroy_sampler(self.sampler, None);
         }
     }
 }
 
 const FULLSCREEN_VERT: &[u32] = include_glsl!("shaders/fullscreen.vert");
-const INSIDE_FRAG: &[u32] = include_glsl!("shaders/inside.frag", debug);
-const OUTSIDE_FRAG: &[u32] = include_glsl!("shaders/outside.frag", debug);
+const INSIDE_FRAG: &[u32] = include_glsl!("shaders/inside.frag");
+const OUTSIDE_FRAG: &[u32] = include_glsl!("shaders/outside.frag");
+const PERSPECTIVE_COMP: &[u32] = include_glsl!("shaders/aerial_perspective.comp");
+const PERSPECTIVE_FRAG: &[u32] = include_glsl!("shaders/aerial_perspective.frag");
 
 impl Renderer {
     /// Construct an atmosphere renderer
@@ -1328,6 +1568,20 @@ impl Renderer {
                 )
                 .unwrap();
 
+            let ap_comp_shader = device
+                .create_shader_module(
+                    &vk::ShaderModuleCreateInfo::builder().code(&PERSPECTIVE_COMP),
+                    None,
+                )
+                .unwrap();
+
+            let ap_frag_shader = device
+                .create_shader_module(
+                    &vk::ShaderModuleCreateInfo::builder().code(&PERSPECTIVE_FRAG),
+                    None,
+                )
+                .unwrap();
+
             let sampler = device
                 .create_sampler(
                     &vk::SamplerCreateInfo {
@@ -1349,7 +1603,8 @@ impl Renderer {
                     &vk::PipelineLayoutCreateInfo::builder()
                         .set_layouts(&[builder.static_layout, builder.frame_layout])
                         .push_constant_ranges(&[vk::PushConstantRange {
-                            stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                            stage_flags: vk::ShaderStageFlags::FRAGMENT
+                                | vk::ShaderStageFlags::COMPUTE,
                             offset: 0,
                             size: mem::size_of::<DrawParams>() as u32,
                         }]),
@@ -1371,6 +1626,7 @@ impl Renderer {
                 .create_graphics_pipelines(
                     cache,
                     &[
+                        // Inside sky view
                         vk::GraphicsPipelineCreateInfo::builder()
                             .stages(&[
                                 vk::PipelineShaderStageCreateInfo {
@@ -1416,13 +1672,11 @@ impl Renderer {
                             .depth_stencil_state(
                                 &vk::PipelineDepthStencilStateCreateInfo::builder()
                                     .depth_test_enable(true)
-                                    .depth_compare_op(
-                                        if inverse_z {
-                                            vk::CompareOp::GREATER_OR_EQUAL
-                                        } else {
-                                            vk::CompareOp::LESS_OR_EQUAL
-                                        }
-                                    )
+                                    .depth_compare_op(if inverse_z {
+                                        vk::CompareOp::GREATER_OR_EQUAL
+                                    } else {
+                                        vk::CompareOp::LESS_OR_EQUAL
+                                    })
                                     .front(noop_stencil_state)
                                     .back(noop_stencil_state)
                                     .max_depth_bounds(inverse_z as u32 as f32)
@@ -1526,6 +1780,87 @@ impl Renderer {
                             .render_pass(render_pass)
                             .subpass(subpass)
                             .build(),
+                        // Inside aerial perspective
+                        vk::GraphicsPipelineCreateInfo::builder()
+                            .stages(&[
+                                vk::PipelineShaderStageCreateInfo {
+                                    stage: vk::ShaderStageFlags::VERTEX,
+                                    module: vert_shader,
+                                    p_name: entry_point,
+                                    p_specialization_info: &*vk::SpecializationInfo::builder()
+                                        .data(&(!inverse_z as u32 as f32).to_bits().to_ne_bytes())
+                                        .map_entries(&[vk::SpecializationMapEntry {
+                                            constant_id: 0,
+                                            offset: 0,
+                                            size: 4,
+                                        }]),
+                                    ..Default::default()
+                                },
+                                vk::PipelineShaderStageCreateInfo {
+                                    stage: vk::ShaderStageFlags::FRAGMENT,
+                                    module: ap_frag_shader,
+                                    p_name: entry_point,
+                                    ..Default::default()
+                                },
+                            ])
+                            .vertex_input_state(&Default::default())
+                            .input_assembly_state(
+                                &vk::PipelineInputAssemblyStateCreateInfo::builder()
+                                    .topology(vk::PrimitiveTopology::TRIANGLE_LIST),
+                            )
+                            .viewport_state(
+                                &vk::PipelineViewportStateCreateInfo::builder()
+                                    .scissor_count(1)
+                                    .viewport_count(1),
+                            )
+                            .rasterization_state(
+                                &vk::PipelineRasterizationStateCreateInfo::builder()
+                                    .cull_mode(vk::CullModeFlags::NONE)
+                                    .polygon_mode(vk::PolygonMode::FILL)
+                                    .line_width(1.0),
+                            )
+                            .multisample_state(
+                                &vk::PipelineMultisampleStateCreateInfo::builder()
+                                    .rasterization_samples(vk::SampleCountFlags::TYPE_1),
+                            )
+                            .depth_stencil_state(
+                                &vk::PipelineDepthStencilStateCreateInfo::builder()
+                                    .depth_test_enable(true)
+                                    // Don't render at infinity
+                                    .depth_compare_op(if inverse_z {
+                                        vk::CompareOp::LESS
+                                    } else {
+                                        vk::CompareOp::GREATER
+                                    })
+                                    .front(noop_stencil_state)
+                                    .back(noop_stencil_state)
+                                    .max_depth_bounds(inverse_z as u32 as f32)
+                                    .min_depth_bounds((1 - inverse_z as u32) as f32),
+                            )
+                            .color_blend_state(
+                                &vk::PipelineColorBlendStateCreateInfo::builder().attachments(&[
+                                    vk::PipelineColorBlendAttachmentState {
+                                        blend_enable: vk::TRUE,
+                                        src_color_blend_factor: vk::BlendFactor::ONE,
+                                        dst_color_blend_factor: vk::BlendFactor::SRC1_COLOR,
+                                        color_blend_op: vk::BlendOp::ADD,
+                                        src_alpha_blend_factor: vk::BlendFactor::ONE,
+                                        dst_alpha_blend_factor: vk::BlendFactor::ZERO,
+                                        alpha_blend_op: vk::BlendOp::ADD,
+                                        color_write_mask: vk::ColorComponentFlags::all(),
+                                    },
+                                ]),
+                            )
+                            .dynamic_state(
+                                &vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&[
+                                    vk::DynamicState::VIEWPORT,
+                                    vk::DynamicState::SCISSOR,
+                                ]),
+                            )
+                            .layout(pipeline_layout)
+                            .render_pass(render_pass)
+                            .subpass(subpass)
+                            .build(),
                     ],
                     None,
                 )
@@ -1533,32 +1868,165 @@ impl Renderer {
                 .into_iter();
             let pipeline = pipelines.next().unwrap();
             let outside_pipeline = pipelines.next().unwrap();
+            let ap_draw = pipelines.next().unwrap();
+
+            let ap_compute = device
+                .create_compute_pipelines(
+                    cache,
+                    &[vk::ComputePipelineCreateInfo {
+                        stage: vk::PipelineShaderStageCreateInfo {
+                            stage: vk::ShaderStageFlags::COMPUTE,
+                            module: ap_comp_shader,
+                            p_name: entry_point,
+                            ..Default::default()
+                        },
+                        layout: pipeline_layout,
+                        ..Default::default()
+                    }],
+                    None,
+                )
+                .unwrap()
+                .into_iter()
+                .next()
+                .unwrap();
+
+            device.destroy_shader_module(vert_shader, None);
+            device.destroy_shader_module(frag_shader, None);
+            device.destroy_shader_module(outside_frag_shader, None);
+            device.destroy_shader_module(ap_comp_shader, None);
+            device.destroy_shader_module(ap_frag_shader, None);
 
             Self {
                 device,
                 sampler,
-                vert_shader,
-                frag_shader,
-                outside_frag_shader,
                 pipeline_layout,
                 pipeline,
                 outside_pipeline,
+                ap_draw,
+                ap_compute,
             }
         }
     }
 
+    /// Call before beginning the renderpass
+    pub fn prepass(
+        &self,
+        cmd: vk::CommandBuffer,
+        atmosphere: &Atmosphere,
+        params: &DrawParams,
+        frame: u32,
+    ) {
+        if params.height >= atmosphere.h_atm {
+            return;
+        }
+        unsafe {
+            self.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                self.pipeline_layout,
+                0,
+                &[atmosphere.ds, atmosphere.frames[frame as usize].ds],
+                &[],
+            );
+            self.device.cmd_push_constants(
+                cmd,
+                self.pipeline_layout,
+                vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::COMPUTE,
+                0,
+                &mem::transmute::<_, [u8; 108]>(*params),
+            );
+
+            let pre_barrier = vk::ImageMemoryBarrier {
+                src_access_mask: vk::AccessFlags::empty(),
+                dst_access_mask: vk::AccessFlags::SHADER_WRITE,
+                old_layout: vk::ImageLayout::UNDEFINED,
+                new_layout: vk::ImageLayout::GENERAL,
+                src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                subresource_range: vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                ..Default::default()
+            };
+
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                Default::default(),
+                &[],
+                &[],
+                &[
+                    vk::ImageMemoryBarrier {
+                        image: atmosphere.frames[frame as usize].ap_scattering.handle,
+                        ..pre_barrier
+                    },
+                    vk::ImageMemoryBarrier {
+                        image: atmosphere.frames[frame as usize].ap_transmittance.handle,
+                        ..pre_barrier
+                    },
+                ],
+            );
+
+            self.device
+                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.ap_compute);
+            self.device.cmd_dispatch(
+                cmd,
+                AERIAL_PERSPECTIVE_EXTENT.width,
+                AERIAL_PERSPECTIVE_EXTENT.height,
+                1,
+            );
+            let post_barrier = vk::ImageMemoryBarrier {
+                src_access_mask: vk::AccessFlags::SHADER_WRITE,
+                dst_access_mask: vk::AccessFlags::SHADER_READ,
+                old_layout: vk::ImageLayout::GENERAL,
+                new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                subresource_range: vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                ..Default::default()
+            };
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                Default::default(),
+                &[],
+                &[],
+                &[
+                    vk::ImageMemoryBarrier {
+                        image: atmosphere.frames[frame as usize].ap_scattering.handle,
+                        ..post_barrier
+                    },
+                    vk::ImageMemoryBarrier {
+                        image: atmosphere.frames[frame as usize].ap_transmittance.handle,
+                        ..post_barrier
+                    },
+                ],
+            );
+        }
+    }
+
+    /// Call in a subpass with the depth buffer as input attachment 0
     pub fn draw(
         &self,
         cmd: vk::CommandBuffer,
         atmosphere: &Atmosphere,
         params: &DrawParams,
-        viewport: vk::Extent2D,
         frame: u32,
     ) {
         let inside = params.height < atmosphere.h_atm;
         unsafe {
-            self.device
-                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, if inside { self.pipeline } else { self.outside_pipeline });
             self.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -1570,30 +2038,25 @@ impl Renderer {
             self.device.cmd_push_constants(
                 cmd,
                 self.pipeline_layout,
-                vk::ShaderStageFlags::FRAGMENT,
+                vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::COMPUTE,
                 0,
                 &mem::transmute::<_, [u8; 108]>(*params),
             );
-            // TODO: Double-check necessity
-            self.device.cmd_set_viewport(
+
+            if inside {
+                self.device
+                    .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.ap_draw);
+                self.device.cmd_draw(cmd, 3, 1, 0, 0);
+            }
+
+            self.device.cmd_bind_pipeline(
                 cmd,
-                0,
-                &[vk::Viewport {
-                    x: 0.0,
-                    y: 0.0,
-                    width: viewport.width as f32,
-                    height: viewport.height as f32,
-                    min_depth: 0.0,
-                    max_depth: 1.0,
-                }],
-            );
-            self.device.cmd_set_scissor(
-                cmd,
-                0,
-                &[vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent: viewport,
-                }],
+                vk::PipelineBindPoint::GRAPHICS,
+                if inside {
+                    self.pipeline
+                } else {
+                    self.outside_pipeline
+                },
             );
             self.device.cmd_draw(cmd, 3, 1, 0, 0);
         }
@@ -1602,6 +2065,8 @@ impl Renderer {
 
 pub struct Frame {
     ds: vk::DescriptorSet,
+    ap_scattering: Image,
+    ap_transmittance: Image,
 }
 
 #[repr(C)]

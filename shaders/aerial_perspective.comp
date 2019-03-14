@@ -1,0 +1,57 @@
+#version 450
+
+#include "precompute.h"
+
+layout (set = 0, binding = 1) uniform sampler3D scattering;
+layout (set = 0, binding = 2) uniform sampler2D transmittance;
+layout (set = 0, binding = 3) uniform sampler2D gathered_sum;
+
+layout (set = 1, binding = 3, rgba16f) uniform writeonly image3D inscattering_out;
+layout (set = 1, binding = 4, rgba16f) uniform writeonly image3D transmittance_out;
+
+#include "draw_params.h"
+
+void main() {
+    // Coordinates for ray origins centered in the screenspace grid
+    vec2 screen = 2 * (gl_GlobalInvocationID.xy / vec2(gl_NumWorkGroups.xy - 1)) - 1;
+    vec3 view = normalize((inverse_viewproj * vec4(screen, 0, 1)).xyz);
+    vec3 origin = zenith * (R_planet + height);
+
+    int steps = imageSize(inscattering_out).z;
+    float step_size = max_ap_depth / steps;
+    vec4 total_inscattering = vec4(0);
+
+    // Densities
+    float prev_m = 0;
+    float prev_r = 0;
+    float prev_o = 0;
+    float total_m = 0;
+    float total_r = 0;
+    float total_o = 0;
+    for (uint i = 0; i < steps; ++i) {
+        // Offset by 0.5 to center in the volumetric grid cell
+        vec3 position = origin + (i + 0.5) * step_size * view; // FIXME: Exponential(?) progression
+        float len = length(position);
+        vec3 sample_zenith = position / len;
+        float sample_height = len - R_planet;
+
+        float m = density_m(sample_height);
+        float r = density_r(sample_height);
+        float o = 6e-7 * r;
+        total_m += step_size * (m + prev_m) / 2;
+        total_r += step_size * (r + prev_r) / 2;
+        total_o += step_size * (o + prev_o) / 2;
+        prev_m = m;
+        prev_r = r;
+        prev_o = o;
+        vec3 xmit_to_camera = exp(-(total_r * beta_r.rgb + total_m * beta_e_m + total_o * beta_e_o.rgb));
+
+        // float u_h = height_to_coord(sample_height);
+        // float u_s = cos_sun_to_coord(dot(sun_direction, sample_zenith));
+        // vec4 multiscattering = texture(gathered_sum, vec2(u_h, u_s));
+        // vec3 xmit_to_sun = texture(transmittance, vec2(height_to_coord(sample_height), cos_view_to_coord(sample_height, dot(sun_direction, sample_zenith)))).rgb;
+
+        imageStore(inscattering_out, ivec3(gl_GlobalInvocationID.xy, i), vec4(0));
+        imageStore(transmittance_out, ivec3(gl_GlobalInvocationID.xy, i), vec4(xmit_to_camera, 1));
+    }
+}
