@@ -1,5 +1,6 @@
 #version 450
 
+#include "aerial_perspective.h"
 #include "precompute.h"
 
 layout (set = 0, binding = 1) uniform sampler3D scattering;
@@ -12,14 +13,16 @@ layout (set = 1, binding = 4, rgba16f) uniform writeonly image3D transmittance_o
 #include "draw_params.h"
 
 void main() {
-    // Coordinates for ray origins centered in the screenspace grid
     vec2 screen = 2 * (gl_GlobalInvocationID.xy / vec2(gl_NumWorkGroups.xy - 1)) - 1;
-    vec3 view = normalize((inverse_viewproj * vec4(screen, 0, 1)).xyz);
+    // Coordinates for ray origins centered in the screenspace grid
+    screen *= vec2(gl_NumWorkGroups.xy - 1) / gl_NumWorkGroups.xy;
+    // This is weird, but it works, at least for inverse-Z infinite-far-plane projections? TODO: Other kinds of projections
+    // Note that we intentionally do not normalize this, to obtain sample points that lie in a plane
+    vec3 view = (inverse_viewproj * vec4(screen, 0, 1)).xyz;
+
     vec3 origin = zenith * (R_planet + height);
 
     int steps = imageSize(inscattering_out).z;
-    float step_size = max_ap_depth / steps;
-    vec4 total_inscattering = vec4(0);
 
     // Densities
     float prev_m = 0;
@@ -28,9 +31,16 @@ void main() {
     float total_m = 0;
     float total_r = 0;
     float total_o = 0;
+    float prev_z = 0;
     for (uint i = 0; i < steps; ++i) {
-        // Offset by 0.5 to center in the volumetric grid cell
-        vec3 position = origin + (i + 0.5) * step_size * view; // FIXME: Exponential(?) progression
+        // Center in the texel
+        float coord = i / float(steps - 1) // 0..1
+            * float(steps - 1) / steps     // 0..(1-1/steps)
+            + 0.5 / steps;                 // (0.5/steps)..(1-0.5/steps)
+        float z = coord_to_z(max_ap_depth, coord);
+        float step_size = z - prev_z;
+        prev_z = z;
+        vec3 position = origin + z * view;
         float len = length(position);
         vec3 sample_zenith = position / len;
         float sample_height = len - R_planet;
@@ -51,6 +61,7 @@ void main() {
         // vec4 multiscattering = texture(gathered_sum, vec2(u_h, u_s));
         // vec3 xmit_to_sun = texture(transmittance, vec2(height_to_coord(sample_height), cos_view_to_coord(sample_height, dot(sun_direction, sample_zenith)))).rgb;
 
+        vec4 what = inverse_viewproj * vec4(screen, 0, 1);
         imageStore(inscattering_out, ivec3(gl_GlobalInvocationID.xy, i), vec4(0));
         imageStore(transmittance_out, ivec3(gl_GlobalInvocationID.xy, i), vec4(xmit_to_camera, 1));
     }
