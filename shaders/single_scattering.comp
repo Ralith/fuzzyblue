@@ -1,0 +1,96 @@
+#version 450
+
+#include "params.h"
+#include "util.h"
+#include "transmittance.h"
+#include "scattering.h"
+
+void ComputeSingleScatteringIntegrand(
+    AtmosphereParameters atmosphere,
+    sampler2D transmittance_texture,
+    float r, float mu, float mu_s, float nu, float d,
+    bool ray_r_mu_intersects_ground,
+    out vec3 rayleigh, out vec3 mie) {
+    float r_d = ClampRadius(atmosphere, sqrt(d * d + 2.0 * r * mu * d + r * r));
+    float mu_s_d = ClampCosine((r * mu_s + d * nu) / r_d);
+    vec3 transmittance =
+        GetTransmittance(
+            atmosphere, transmittance_texture, r, mu, d,
+            ray_r_mu_intersects_ground) *
+        GetTransmittanceToSun(
+            atmosphere, transmittance_texture, r_d, mu_s_d);
+    rayleigh = transmittance * GetProfileDensity(
+        atmosphere.rayleigh_density, r_d - atmosphere.bottom_radius);
+    mie = transmittance * GetProfileDensity(
+        atmosphere.mie_density, r_d - atmosphere.bottom_radius);
+}
+
+void ComputeSingleScattering(
+    AtmosphereParameters atmosphere,
+    sampler2D transmittance_texture,
+    float r, float mu, float mu_s, float nu,
+    bool ray_r_mu_intersects_ground,
+    out vec3 rayleigh, out vec3 mie) {
+    // assert(r >= atmosphere.bottom_radius && r <= atmosphere.top_radius);
+    // assert(mu >= -1.0 && mu <= 1.0);
+    // assert(mu_s >= -1.0 && mu_s <= 1.0);
+    // assert(nu >= -1.0 && nu <= 1.0);
+
+    // Number of intervals for the numerical integration.
+    const int SAMPLE_COUNT = 50;
+    // The integration step, i.e. the length of each integration interval.
+    float dx =
+        DistanceToNearestAtmosphereBoundary(atmosphere, r, mu,
+                                            ray_r_mu_intersects_ground) / float(SAMPLE_COUNT);
+    // Integration loop.
+    vec3 rayleigh_sum = vec3(0.0);
+    vec3 mie_sum = vec3(0.0);
+    for (int i = 0; i <= SAMPLE_COUNT; ++i) {
+        float d_i = float(i) * dx;
+        // The Rayleigh and Mie single scattering at the current sample point.
+        vec3 rayleigh_i;
+        vec3 mie_i;
+        ComputeSingleScatteringIntegrand(atmosphere, transmittance_texture,
+                                         r, mu, mu_s, nu, d_i, ray_r_mu_intersects_ground, rayleigh_i, mie_i);
+        // Sample weight (from the trapezoidal rule).
+        float weight_i = (i == 0 || i == SAMPLE_COUNT) ? 0.5 : 1.0;
+        rayleigh_sum += rayleigh_i * weight_i;
+        mie_sum += mie_i * weight_i;
+    }
+    rayleigh = rayleigh_sum * dx * atmosphere.solar_irradiance *
+        atmosphere.rayleigh_scattering;
+    mie = mie_sum * dx * atmosphere.solar_irradiance * atmosphere.mie_scattering;
+}
+
+void ComputeSingleScatteringTexture(AtmosphereParameters atmosphere,
+                                    sampler2D transmittance_texture, vec3 frag_coord,
+                                    out vec3 rayleigh, out vec3 mie) {
+    float r;
+    float mu;
+    float mu_s;
+    float nu;
+    bool ray_r_mu_intersects_ground;
+    GetRMuMuSNuFromScatteringTextureFragCoord(atmosphere, frag_coord,
+                                              r, mu, mu_s, nu, ray_r_mu_intersects_ground);
+    ComputeSingleScattering(atmosphere, transmittance_texture,
+                            r, mu, mu_s, nu, ray_r_mu_intersects_ground, rayleigh, mie);
+}
+
+layout (set=0, binding=0) uniform Params {
+    AtmosphereParameters atmosphere;
+};
+layout (set=1, binding=0) uniform sampler2D transmittance;
+layout (set=1, binding=1, rgba16f) uniform writeonly image3D delta_rayleigh;
+layout (set=1, binding=2, rgba16f) uniform writeonly image3D delta_mie;
+layout (set=1, binding=3, rgba16f) uniform writeonly image3D scattering;
+
+void main() {
+    vec3 frag_coord = GetFragCoordFromTexel(gl_GlobalInvocationID, gl_NumWorkGroups);
+    vec3 rayleigh;
+    vec3 mie;
+    ComputeSingleScatteringTexture(atmosphere, transmittance, frag_coord, rayleigh, mie);
+    ivec3 coords = ivec3(gl_GlobalInvocationID);
+    imageStore(delta_rayleigh, coords, vec4(rayleigh, 0));
+    imageStore(delta_mie, coords, vec4(mie, 0));
+    imageStore(scattering, coords, vec4(rayleigh, mie.r));
+}

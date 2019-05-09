@@ -1,0 +1,88 @@
+#version 450
+
+#include "params.h"
+#include "scattering.h"
+#include "transmittance.h"
+
+vec3 ComputeMultipleScattering(
+    AtmosphereParameters atmosphere,
+    sampler2D transmittance_texture,
+    sampler3D scattering_density_texture,
+    float r, float mu, float mu_s, float nu,
+    bool ray_r_mu_intersects_ground) {
+    // assert(r >= atmosphere.bottom_radius && r <= atmosphere.top_radius);
+    // assert(mu >= -1.0 && mu <= 1.0);
+    // assert(mu_s >= -1.0 && mu_s <= 1.0);
+    // assert(nu >= -1.0 && nu <= 1.0);
+
+    // float of intervals for the numerical integration.
+    const int SAMPLE_COUNT = 50;
+    // The integration step, i.e. the length of each integration interval.
+    float dx =
+        DistanceToNearestAtmosphereBoundary(
+            atmosphere, r, mu, ray_r_mu_intersects_ground) /
+        float(SAMPLE_COUNT);
+    // Integration loop.
+    // watt_per_square_meter_per_sr_per_nm
+    vec3 rayleigh_mie_sum = vec3(0.0);
+    for (int i = 0; i <= SAMPLE_COUNT; ++i) {
+        float d_i = float(i) * dx;
+
+        // The r, mu and mu_s parameters at the current integration point (see the
+        // single scattering section for a detailed explanation).
+        float r_i =
+            ClampRadius(atmosphere, sqrt(d_i * d_i + 2.0 * r * mu * d_i + r * r));
+        float mu_i = ClampCosine((r * mu + d_i) / r_i);
+        float mu_s_i = ClampCosine((r * mu_s + d_i * nu) / r_i);
+
+        // The Rayleigh and Mie multiple scattering at the current sample point.
+        vec3 rayleigh_mie_i =
+            GetScattering(
+                atmosphere, scattering_density_texture, r_i, mu_i, mu_s_i, nu,
+                ray_r_mu_intersects_ground) *
+            GetTransmittance(
+                atmosphere, transmittance_texture, r, mu, d_i,
+                ray_r_mu_intersects_ground) *
+            dx;
+        // Sample weight (from the trapezoidal rule).
+        float weight_i = (i == 0 || i == SAMPLE_COUNT) ? 0.5 : 1.0;
+        rayleigh_mie_sum += rayleigh_mie_i * weight_i;
+    }
+    return rayleigh_mie_sum;
+}
+
+vec3 ComputeMultipleScatteringTexture(
+    AtmosphereParameters atmosphere,
+    sampler2D transmittance_texture,
+    sampler3D scattering_density_texture,
+    vec3 frag_coord, out float nu) {
+    float r;
+    float mu;
+    float mu_s;
+    bool ray_r_mu_intersects_ground;
+    GetRMuMuSNuFromScatteringTextureFragCoord(atmosphere, frag_coord,
+                                              r, mu, mu_s, nu, ray_r_mu_intersects_ground);
+    return ComputeMultipleScattering(atmosphere, transmittance_texture,
+                                     scattering_density_texture, r, mu, mu_s, nu,
+                                     ray_r_mu_intersects_ground);
+}
+
+layout (set=0, binding=0) uniform Params {
+    AtmosphereParameters atmosphere;
+};
+
+layout (set=1, binding=0) uniform sampler2D transmittance_texture;
+layout (set=1, binding=1) uniform sampler3D scattering_density_texture;
+layout (set=1, binding=2, rgba16f) uniform writeonly image3D delta_multiple_scattering;
+layout (set=1, binding=3, rgba16f) uniform image3D scattering;
+
+void main() {
+    vec3 frag_coord = GetFragCoordFromTexel(gl_GlobalInvocationID, gl_NumWorkGroups);
+    float nu;
+    ivec3 coords = ivec3(gl_GlobalInvocationID);
+    vec3 ms = ComputeMultipleScatteringTexture(
+        atmosphere, transmittance_texture, scattering_density_texture,
+        frag_coord, nu);
+    imageStore(delta_multiple_scattering, coords, vec4(ms, 0));
+    imageStore(scattering, coords, vec4(ms / RayleighPhaseFunction(nu), 0) + imageLoad(scattering, coords));
+}

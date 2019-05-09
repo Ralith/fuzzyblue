@@ -1,6 +1,6 @@
 [package]
 name = "fuzzyblue"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Benjamin Saunders <ben.e.saunders@gmail.com>"]
 license = "MIT/Apache-2.0"
 edition = "2018"
@@ -8,3 +8,8 @@ edition = "2018"
 [dependencies]
 ash = "0.31"
 vk-shader-macros = "0.2"
+
+[dev-dependencies]
+openexr = "0.6"
+half = "1"
+renderdoc = { version = "0.9", default-features = false }
