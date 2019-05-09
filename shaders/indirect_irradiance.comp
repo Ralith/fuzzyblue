@@ -1,0 +1,69 @@
+#version 450
+
+#include "irradiance.h"
+
+#include "params.h"
+#include "scattering.h"
+
+vec3 ComputeIndirectIrradiance(
+    AtmosphereParameters atmosphere,
+    sampler3D single_rayleigh_scattering_texture,
+    sampler3D single_mie_scattering_texture,
+    sampler3D multiple_scattering_texture,
+    float r, float mu_s, int scattering_order) {
+    // assert(r >= atmosphere.bottom_radius && r <= atmosphere.top_radius);
+    // assert(mu_s >= -1.0 && mu_s <= 1.0);
+    // assert(scattering_order >= 1);
+
+    const int SAMPLE_COUNT = 32;
+    const float dphi = PI / float(SAMPLE_COUNT);
+    const float dtheta = PI / float(SAMPLE_COUNT);
+
+    // watt_per_square_meter_per_nm
+    vec3 result = vec3(0.0);
+    vec3 omega_s = vec3(sqrt(1.0 - mu_s * mu_s), 0.0, mu_s);
+    for (int j = 0; j < SAMPLE_COUNT / 2; ++j) {
+        float theta = (float(j) + 0.5) * dtheta;
+        for (int i = 0; i < 2 * SAMPLE_COUNT; ++i) {
+            float phi = (float(i) + 0.5) * dphi;
+            vec3 omega =
+                vec3(cos(phi) * sin(theta), sin(phi) * sin(theta), cos(theta));
+            float domega = dtheta * dphi * sin(theta);
+
+            float nu = dot(omega, omega_s);
+            result += GetScattering(atmosphere, single_rayleigh_scattering_texture,
+                                    single_mie_scattering_texture, multiple_scattering_texture,
+                                    r, omega.z, mu_s, nu, false /* ray_r_theta_intersects_ground */,
+                                    scattering_order) *
+                omega.z * domega;
+        }
+    }
+    return result;
+}
+
+layout (set=0, binding=0) uniform Params {
+    AtmosphereParameters atmosphere;
+};
+
+layout (set=1, binding=0) uniform sampler3D single_rayleigh_scattering_texture;
+layout (set=1, binding=1) uniform sampler3D single_mie_scattering_texture;
+layout (set=1, binding=2) uniform sampler3D multiple_scattering_texture;
+layout (set=1, binding=3, rgba16f) uniform writeonly image2D delta_irradiance;
+layout (set=1, binding=4, rgba16f) uniform image2D irradiance;
+layout (push_constant) uniform PerOrder {
+    int scattering_order;
+};
+
+void main() {
+    float x_mu_s = gl_GlobalInvocationID.x / float(gl_NumWorkGroups.x - 1);
+    float x_r = gl_GlobalInvocationID.y / float(gl_NumWorkGroups.y - 1);
+    float r, mu_s;
+    GetRMuSFromIrradianceUnitRange(atmosphere, x_mu_s, x_r, r, mu_s);
+    vec3 result = ComputeIndirectIrradiance(
+        atmosphere,
+        single_rayleigh_scattering_texture, single_mie_scattering_texture,
+        multiple_scattering_texture, r, mu_s, scattering_order);
+    ivec2 coords = ivec2(gl_GlobalInvocationID);
+    imageStore(delta_irradiance, coords, vec4(result, 0));
+    imageStore(irradiance, coords, vec4(result, 0) + imageLoad(irradiance, coords));
+}

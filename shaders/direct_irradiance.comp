@@ -1,0 +1,41 @@
+#version 450
+
+#include "irradiance.h"
+
+#include "params.h"
+#include "transmittance.h"
+
+vec3 ComputeDirectIrradiance(
+    AtmosphereParameters atmosphere,
+    sampler2D transmittance_texture,
+    float r, float mu_s) {
+    // assert(r >= atmosphere.bottom_radius && r <= atmosphere.top_radius);
+    // assert(mu_s >= -1.0 && mu_s <= 1.0);
+
+    float alpha_s = atmosphere.sun_angular_radius;
+    // Approximate average of the cosine factor mu_s over the visible fraction of
+    // the Sun disc.
+    float average_cosine_factor =
+        mu_s < -alpha_s ? 0.0 : (mu_s > alpha_s ? mu_s :
+                                 (mu_s + alpha_s) * (mu_s + alpha_s) / (4.0 * alpha_s));
+
+    return atmosphere.solar_irradiance *
+        GetTransmittanceToTopAtmosphereBoundary(
+            atmosphere, transmittance_texture, r, mu_s) * average_cosine_factor;
+}
+
+layout (set=0, binding=0) uniform Params {
+    AtmosphereParameters atmosphere;
+};
+
+layout (set=1, binding=0) uniform sampler2D transmittance_texture;
+layout (set=1, binding=1, rgba16f) uniform writeonly image2D delta_irradiance;
+
+void main() {
+    float x_mu_s = gl_GlobalInvocationID.x / float(gl_NumWorkGroups.x - 1);
+    float x_r = gl_GlobalInvocationID.y / float(gl_NumWorkGroups.y - 1);
+    float r, mu_s;
+    GetRMuSFromIrradianceUnitRange(atmosphere, x_mu_s, x_r, r, mu_s);
+    vec3 result = ComputeDirectIrradiance(atmosphere, transmittance_texture, r, mu_s);
+    imageStore(delta_irradiance, ivec2(gl_GlobalInvocationID), vec4(result, 0));
+}
