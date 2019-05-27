@@ -14,11 +14,14 @@ pub struct Renderer {
     device: Arc<Device>,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+    frame_pool: vk::DescriptorPool,
+    frames: Vec<Frame>,
 }
 
 impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
+            self.device.destroy_descriptor_pool(self.frame_pool, None);
             self.device.destroy_pipeline(self.pipeline, None);
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
@@ -33,6 +36,7 @@ impl Renderer {
         cache: vk::PipelineCache,
         render_pass: vk::RenderPass,
         subpass: u32,
+        frames: u32,
     ) -> Self {
         let device = builder.device().clone();
         unsafe {
@@ -53,7 +57,7 @@ impl Renderer {
             let pipeline_layout = device
                 .create_pipeline_layout(
                     &vk::PipelineLayoutCreateInfo::builder()
-                        .set_layouts(&[builder.render_ds_layout()])
+                        .set_layouts(&[builder.render_ds_layout(), builder.frame_ds_layout()])
                         .push_constant_ranges(&[vk::PushConstantRange {
                             stage_flags: vk::ShaderStageFlags::FRAGMENT,
                             offset: 0,
@@ -151,15 +155,64 @@ impl Renderer {
 
             let pipeline = pipelines.next().unwrap();
 
+            let frame_pool = device
+                .create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo::builder()
+                        .max_sets(frames)
+                        .pool_sizes(&[vk::DescriptorPoolSize {
+                            ty: vk::DescriptorType::INPUT_ATTACHMENT,
+                            descriptor_count: frames,
+                        }]),
+                    None,
+                )
+                .unwrap();
+            let frames = device
+                .allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::builder()
+                        .descriptor_pool(frame_pool)
+                        .set_layouts(
+                            &(0..frames)
+                                .map(|_| builder.frame_ds_layout())
+                                .collect::<Vec<_>>(),
+                        ),
+                )
+                .unwrap()
+                .into_iter()
+                .map(|ds| Frame { ds })
+                .collect();
+
             Self {
                 device,
                 pipeline_layout,
                 pipeline,
+                frame_pool,
+                frames,
             }
         }
     }
 
-    pub fn draw(&self, cmd: vk::CommandBuffer, atmosphere: &Atmosphere, params: &DrawParameters) {
+    pub unsafe fn set_depth_buffer(&mut self, frame: u32, image: &vk::DescriptorImageInfo) {
+        self.device.update_descriptor_sets(
+            &[vk::WriteDescriptorSet {
+                dst_set: self.frames[frame as usize].ds,
+                dst_binding: 0,
+                dst_array_element: 0,
+                descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
+                p_image_info: image,
+                ..Default::default()
+            }],
+            &[],
+        );
+    }
+
+    pub fn draw(
+        &self,
+        cmd: vk::CommandBuffer,
+        atmosphere: &Atmosphere,
+        frame: u32,
+        params: &DrawParameters,
+    ) {
         unsafe {
             self.device
                 .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
@@ -168,7 +221,7 @@ impl Renderer {
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline_layout,
                 0,
-                &[atmosphere.descriptor_set()],
+                &[atmosphere.descriptor_set(), self.frames[frame as usize].ds],
                 &[],
             );
             self.device.cmd_push_constants(
@@ -181,6 +234,10 @@ impl Renderer {
             self.device.cmd_draw(cmd, 3, 1, 0, 0);
         }
     }
+}
+
+struct Frame {
+    ds: vk::DescriptorSet,
 }
 
 /// Rendering parameters for an individual frame

@@ -20,6 +20,7 @@ pub struct Builder {
     sampler: vk::Sampler,
     params_ds_layout: vk::DescriptorSetLayout,
     render_ds_layout: vk::DescriptorSetLayout,
+    frame_ds_layout: vk::DescriptorSetLayout,
     transmittance: Pass,
     single_scattering: Pass,
     direct_irradiance: Pass,
@@ -36,6 +37,8 @@ impl Drop for Builder {
                 .destroy_descriptor_set_layout(self.params_ds_layout, None);
             self.device
                 .destroy_descriptor_set_layout(self.render_ds_layout, None);
+            self.device
+                .destroy_descriptor_set_layout(self.frame_ds_layout, None);
             for &pass in &[
                 &self.transmittance,
                 &self.single_scattering,
@@ -439,6 +442,21 @@ impl Builder {
                 )
                 .unwrap();
 
+            let frame_ds_layout = device
+                .create_descriptor_set_layout(
+                    &vk::DescriptorSetLayoutCreateInfo::builder().bindings(&[
+                        vk::DescriptorSetLayoutBinding {
+                            binding: 0,
+                            descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
+                            descriptor_count: 1,
+                            stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                            p_immutable_samplers: ptr::null(),
+                        },
+                    ]),
+                    None,
+                )
+                .unwrap();
+
             let p_name = b"main\0".as_ptr() as *const i8;
 
             let mut pipelines = device
@@ -557,6 +575,7 @@ impl Builder {
                 sampler,
                 params_ds_layout,
                 render_ds_layout,
+                frame_ds_layout,
                 transmittance,
                 direct_irradiance,
                 indirect_irradiance,
@@ -621,6 +640,9 @@ impl Builder {
 
     pub(crate) fn render_ds_layout(&self) -> vk::DescriptorSetLayout {
         self.render_ds_layout
+    }
+    pub(crate) fn frame_ds_layout(&self) -> vk::DescriptorSetLayout {
+        self.frame_ds_layout
     }
 }
 
@@ -1783,14 +1805,12 @@ impl Atmosphere {
                 Default::default(),
                 &[],
                 &[],
-                &[
-                    vk::ImageMemoryBarrier {
-                        image: irradiance.handle,
-                        src_access_mask: vk::AccessFlags::TRANSFER_WRITE,
-                        old_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                        ..write_barrier
-                    },
-                ],
+                &[vk::ImageMemoryBarrier {
+                    image: irradiance.handle,
+                    src_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+                    old_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    ..write_barrier
+                }],
             );
 
             device.cmd_pipeline_barrier(
