@@ -19,13 +19,15 @@ layout (push_constant) uniform DrawParams {
     vec3 sun_direction;
 };
 
+layout (set=1, binding=0, input_attachment_index=0) uniform subpassInput depth_buffer;
+
 void main() {
-    vec3 view = normalize((inverse_viewproj * vec4(2*screen_coords - 1, 0, 1)).xyz);
+    vec4 world_pre = (inverse_viewproj * vec4(2*screen_coords - 1, subpassLoad(depth_buffer).x, 1));
+    vec3 world = world_pre.xyz / world_pre.w;
     vec3 transmittance;
-    // TODO: ...ToPoint using depth buffer
-    vec3 color = GetSkyRadiance(
+    vec3 color = GetSkyRadianceToPoint(
         atmosphere, transmittance_texture, scattering_texture,
-        camera_position, view, sun_direction,
+        camera_position, world, sun_direction,
         transmittance);
     color_out = vec4(color, 0);
     transmittance_out = vec4(transmittance, 1);
