@@ -6,5 +6,5 @@ license = "MIT/Apache-2.0"
 edition = "2018"
 
 [dependencies]
-ash = "0.27.1"
-vk-shader-macros = "0.1"
+ash = "0.29.0"
+vk-shader-macros = "0.2"
