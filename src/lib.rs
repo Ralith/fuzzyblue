@@ -3,6 +3,8 @@
 //! Primarily derived from G. Bodare and E. Sandberg's "Efficient and Dynamic Atmospheric
 //! Scattering." See also E. Bruneton and F. Neyret's "Precomputed atmospheric scattering".
 
+#![allow(clippy::missing_safety_doc)]
+
 use std::{mem, ptr, sync::Arc};
 
 use ash::version::{DeviceV1_0, InstanceV1_0};
@@ -1243,21 +1245,19 @@ impl Drop for Atmosphere {
 impl Atmosphere {
     pub unsafe fn set_depth_buffer(&mut self, frame: u32, depth: vk::ImageView) {
         self.device.update_descriptor_sets(
-            &[
-                vk::WriteDescriptorSet {
-                    dst_set: self.frames[frame as usize].ds,
-                    dst_binding: 0,
-                    dst_array_element: 0,
-                    descriptor_count: 1,
-                    descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
-                    p_image_info: &vk::DescriptorImageInfo {
-                        sampler: vk::Sampler::null(),
-                        image_view: depth,
-                        image_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-                    },
-                    ..Default::default()
+            &[vk::WriteDescriptorSet {
+                dst_set: self.frames[frame as usize].ds,
+                dst_binding: 0,
+                dst_array_element: 0,
+                descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::INPUT_ATTACHMENT,
+                p_image_info: &vk::DescriptorImageInfo {
+                    sampler: vk::Sampler::null(),
+                    image_view: depth,
+                    image_layout: vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
                 },
-            ],
+                ..Default::default()
+            }],
             &[],
         );
     }
@@ -1416,13 +1416,11 @@ impl Renderer {
                             .depth_stencil_state(
                                 &vk::PipelineDepthStencilStateCreateInfo::builder()
                                     .depth_test_enable(true)
-                                    .depth_compare_op(
-                                        if inverse_z {
-                                            vk::CompareOp::GREATER_OR_EQUAL
-                                        } else {
-                                            vk::CompareOp::LESS_OR_EQUAL
-                                        }
-                                    )
+                                    .depth_compare_op(if inverse_z {
+                                        vk::CompareOp::GREATER_OR_EQUAL
+                                    } else {
+                                        vk::CompareOp::LESS_OR_EQUAL
+                                    })
                                     .front(noop_stencil_state)
                                     .back(noop_stencil_state)
                                     .max_depth_bounds(inverse_z as u32 as f32)
@@ -1556,8 +1554,15 @@ impl Renderer {
     ) {
         let inside = params.height < atmosphere.h_atm;
         unsafe {
-            self.device
-                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, if inside { self.pipeline } else { self.outside_pipeline });
+            self.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                if inside {
+                    self.pipeline
+                } else {
+                    self.outside_pipeline
+                },
+            );
             self.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::GRAPHICS,
