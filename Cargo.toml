@@ -13,3 +13,8 @@ vk-shader-macros = "0.2"
 openexr = "0.6"
 half = "1"
 renderdoc = { version = "0.9", default-features = false }
+bencher = "0.1.5"
+
+[[bench]]
+name = "precompute"
+harness = false
