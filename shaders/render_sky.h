@@ -110,22 +110,27 @@ vec3 GetSkyRadianceToPoint(
     AtmosphereParameters atmosphere,
     sampler2D transmittance_texture,
     sampler3D scattering_texture,
-    vec3 camera, vec3 point,
+    vec3 camera, vec3 view_ray, vec3 point,
     vec3 sun_direction, out vec3 transmittance) {
     // Compute the distance to the top atmosphere boundary along the view ray,
     // assuming the viewer is in space (or NaN if the view ray does not intersect
     // the atmosphere).
-    vec3 view_ray = normalize(point - camera);
     float r = length(camera);
     float rmu = dot(camera, view_ray);
     float distance_to_top_atmosphere_boundary = -rmu -
         sqrt(rmu * rmu - r * r + atmosphere.top_radius * atmosphere.top_radius);
+
     // If the viewer is in space and the view ray intersects the atmosphere, move
     // the viewer to the top atmosphere boundary (along the view ray):
     if (distance_to_top_atmosphere_boundary > 0.0) {
         camera = camera + view_ray * distance_to_top_atmosphere_boundary;
         r = atmosphere.top_radius;
         rmu += distance_to_top_atmosphere_boundary;
+    } else if (r > atmosphere.top_radius) {
+        // If the view ray does not intersect the atmosphere, simply return 0.
+        transmittance = vec3(1.0);
+        // watt_per_square_meter_per_sr_per_nm
+        return vec3(0.0);
     }
 
     // Compute the r, mu, mu_s and nu parameters for the first texture lookup.
@@ -144,38 +149,40 @@ vec3 GetSkyRadianceToPoint(
         r, mu, mu_s, nu, ray_r_mu_intersects_ground,
         single_mie_scattering);
 
-    // Compute the r, mu, mu_s and nu parameters for the second texture lookup.
-    // If shadow_length is not 0 (case of light shafts), we want to ignore the
-    // scattering along the last shadow_length meters of the view ray, which we
-    // do by subtracting shadow_length from d (this way scattering_p is equal to
-    // the S|x_s=x_0-lv term in Eq. (17) of our paper).
-    // d = max(d - shadow_length, 0.0 * m);
-    float r_p = ClampRadius(atmosphere, sqrt(d * d + 2.0 * r * mu * d + r * r));
-    float mu_p = (r * mu + d) / r_p;
-    float mu_s_p = (r * mu_s + d * nu) / r_p;
+    if (!isinf(d)) {
+        // Compute the r, mu, mu_s and nu parameters for the second texture lookup.
+        // If shadow_length is not 0 (case of light shafts), we want to ignore the
+        // scattering along the last shadow_length meters of the view ray, which we
+        // do by subtracting shadow_length from d (this way scattering_p is equal to
+        // the S|x_s=x_0-lv term in Eq. (17) of our paper).
+        // d = max(d - shadow_length, 0.0 * m);
+        float r_p = ClampRadius(atmosphere, sqrt(d * d + 2.0 * r * mu * d + r * r));
+        float mu_p = (r * mu + d) / r_p;
+        float mu_s_p = (r * mu_s + d * nu) / r_p;
 
-    vec3 single_mie_scattering_p;
-    vec3 scattering_p = GetCombinedScattering(
-        atmosphere, scattering_texture,
-        r_p, mu_p, mu_s_p, nu, ray_r_mu_intersects_ground,
-        single_mie_scattering_p);
+        vec3 single_mie_scattering_p;
+        vec3 scattering_p = GetCombinedScattering(
+                                                  atmosphere, scattering_texture,
+                                                  r_p, mu_p, mu_s_p, nu, ray_r_mu_intersects_ground,
+                                                  single_mie_scattering_p);
 
-    // Combine the lookup results to get the scattering between camera and point.
-    vec3 shadow_transmittance = transmittance;
-    // if (shadow_length > 0.0 * m) {
-    //   // This is the T(x,x_s) term in Eq. (17) of our paper, for light shafts.
-    //   shadow_transmittance = GetTransmittance(atmosphere, transmittance_texture,
-    //       r, mu, d, ray_r_mu_intersects_ground);
-    // }
-    scattering = scattering - shadow_transmittance * scattering_p;
-    single_mie_scattering =
-        single_mie_scattering - shadow_transmittance * single_mie_scattering_p;
-    single_mie_scattering = GetExtrapolatedSingleMieScattering(
-        atmosphere, vec4(scattering, single_mie_scattering.r));
+        // Combine the lookup results to get the scattering between camera and point.
+        vec3 shadow_transmittance = transmittance;
+        // if (shadow_length > 0.0 * m) {
+        //   // This is the T(x,x_s) term in Eq. (17) of our paper, for light shafts.
+        //   shadow_transmittance = GetTransmittance(atmosphere, transmittance_texture,
+        //       r, mu, d, ray_r_mu_intersects_ground);
+        // }
+        scattering = scattering - shadow_transmittance * scattering_p;
+        single_mie_scattering =
+            single_mie_scattering - shadow_transmittance * single_mie_scattering_p;
+        single_mie_scattering = GetExtrapolatedSingleMieScattering(
+                                                                   atmosphere, vec4(scattering, single_mie_scattering.r));
 
-    // Hack to avoid rendering artifacts when the sun is below the horizon.
-    single_mie_scattering = single_mie_scattering *
-        smoothstep(0.0, 0.01, mu_s);
+        // Hack to avoid rendering artifacts when the sun is below the horizon.
+        single_mie_scattering = single_mie_scattering *
+            smoothstep(0.0, 0.01, mu_s);
+    }
 
     return scattering * RayleighPhaseFunction(nu) + single_mie_scattering *
         MiePhaseFunction(atmosphere.mie_phase_function_g, nu);
