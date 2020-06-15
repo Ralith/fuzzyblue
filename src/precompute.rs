@@ -675,6 +675,18 @@ pub struct DensityProfile {
     pub layers: [DensityProfileLayer; 2],
 }
 
+/// Parameters governing generated skies
+///
+/// Distances in km.
+///
+/// # LUT dimensions
+///
+/// All values are encoded in various ways to achieve a useful distribution of precision.
+///
+/// - μ (mu): view angle from vertical
+/// - μ_s (mu_s): sun angle from vertical
+/// - r: distance from planet origin
+/// - ν (nu): view angle from sun
 pub struct Parameters {
     /// Extra usage flags for the generated look-up tables
     pub usage: vk::ImageUsageFlags,
