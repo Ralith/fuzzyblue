@@ -1739,8 +1739,8 @@ impl Atmosphere {
             );
             device.cmd_dispatch(
                 cmd,
-                transmittance_extent.width,
-                transmittance_extent.height,
+                transmittance_extent.width / WORKGROUP_SIZE_2D,
+                transmittance_extent.height / WORKGROUP_SIZE_2D,
                 1,
             );
 
@@ -1771,7 +1771,12 @@ impl Atmosphere {
                 &[direct_irradiance_ds],
                 &[],
             );
-            device.cmd_dispatch(cmd, irradiance_extent.width, irradiance_extent.height, 1);
+            device.cmd_dispatch(
+                cmd,
+                irradiance_extent.width / WORKGROUP_SIZE_2D,
+                irradiance_extent.height / WORKGROUP_SIZE_2D,
+                1,
+            );
 
             // Single scattering
             device.cmd_bind_pipeline(
@@ -1789,9 +1794,9 @@ impl Atmosphere {
             );
             device.cmd_dispatch(
                 cmd,
-                scattering_extent.width,
-                scattering_extent.height,
-                scattering_extent.depth,
+                scattering_extent.width / WORKGROUP_SIZE_3D,
+                scattering_extent.height / WORKGROUP_SIZE_3D,
+                scattering_extent.depth / WORKGROUP_SIZE_3D,
             );
 
             device.cmd_clear_color_image(
@@ -1893,9 +1898,9 @@ impl Atmosphere {
                 );
                 device.cmd_dispatch(
                     cmd,
-                    scattering_extent.width,
-                    scattering_extent.height,
-                    scattering_extent.depth,
+                    scattering_extent.width / WORKGROUP_SIZE_3D,
+                    scattering_extent.height / WORKGROUP_SIZE_3D,
+                    scattering_extent.depth / WORKGROUP_SIZE_3D,
                 );
 
                 device.cmd_pipeline_barrier(
@@ -1940,7 +1945,12 @@ impl Atmosphere {
                     0,
                     &(order - 1).to_ne_bytes(),
                 );
-                device.cmd_dispatch(cmd, irradiance_extent.width, irradiance_extent.height, 1);
+                device.cmd_dispatch(
+                    cmd,
+                    irradiance_extent.width / WORKGROUP_SIZE_2D,
+                    irradiance_extent.height / WORKGROUP_SIZE_2D,
+                    1,
+                );
 
                 device.cmd_pipeline_barrier(
                     cmd,
@@ -1982,9 +1992,9 @@ impl Atmosphere {
                 );
                 device.cmd_dispatch(
                     cmd,
-                    scattering_extent.width,
-                    scattering_extent.height,
-                    scattering_extent.depth,
+                    scattering_extent.width / WORKGROUP_SIZE_3D,
+                    scattering_extent.height / WORKGROUP_SIZE_3D,
+                    scattering_extent.depth / WORKGROUP_SIZE_3D,
                 );
             }
 
@@ -2238,3 +2248,6 @@ unsafe fn allocate(
             .unwrap(),
     )
 }
+
+const WORKGROUP_SIZE_2D: u32 = 8;
+const WORKGROUP_SIZE_3D: u32 = 4;
