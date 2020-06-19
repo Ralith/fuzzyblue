@@ -85,7 +85,10 @@ layout (set=1, binding=2, rgba16f) uniform writeonly image3D delta_mie;
 layout (set=1, binding=3, rgba16f) uniform writeonly image3D scattering;
 
 void main() {
-    vec3 frag_coord = GetFragCoordFromTexel(gl_GlobalInvocationID, gl_NumWorkGroups);
+    vec3 frag_coord;
+    if (!GetScatteringFragCoord(atmosphere, gl_GlobalInvocationID, frag_coord)) {
+        return;
+    }
     vec3 rayleigh;
     vec3 mie;
     ComputeSingleScatteringTexture(atmosphere, transmittance, frag_coord, rayleigh, mie);

@@ -2,6 +2,7 @@
 #define FUZZYBLUE_SCATTERING_H_
 
 #include "params.h"
+#include "util.h"
 
 vec4 GetScatteringTextureUvwzFromRMuMuSNu(AtmosphereParameters atmosphere,
                                           float r, float mu, float mu_s, float nu,
@@ -175,6 +176,17 @@ vec3 GetScattering(
             atmosphere, multiple_scattering_texture, r, mu, mu_s, nu,
             ray_r_mu_intersects_ground);
     }
+}
+
+bool GetScatteringFragCoord(AtmosphereParameters atmosphere, uvec3 id, out vec3 coord) {
+    uvec3 ref = uvec3(atmosphere.scattering_texture_nu_size * atmosphere.scattering_texture_mu_s_size,
+                      atmosphere.scattering_texture_mu_size,
+                      atmosphere.scattering_texture_r_size);
+    if (any(greaterThanEqual(id, ref))) {
+        return false;
+    }
+    coord = GetFragCoordFromTexel(id, ref);
+    return true;
 }
 
 #endif

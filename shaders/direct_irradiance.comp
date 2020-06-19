@@ -32,8 +32,11 @@ layout (set=1, binding=0) uniform sampler2D transmittance_texture;
 layout (set=1, binding=1, rgba16f) uniform writeonly image2D delta_irradiance;
 
 void main() {
-    float x_mu_s = gl_GlobalInvocationID.x / float(gl_NumWorkGroups.x - 1);
-    float x_r = gl_GlobalInvocationID.y / float(gl_NumWorkGroups.y - 1);
+    if (any(greaterThanEqual(gl_GlobalInvocationID.xy, uvec2(atmosphere.irradiance_texture_mu_s_size, atmosphere.irradiance_texture_r_size)))) {
+        return;
+    }
+    float x_mu_s = gl_GlobalInvocationID.x / float(atmosphere.irradiance_texture_mu_s_size - 1);
+    float x_r = gl_GlobalInvocationID.y / float(atmosphere.irradiance_texture_r_size - 1);
     float r, mu_s;
     GetRMuSFromIrradianceUnitRange(atmosphere, x_mu_s, x_r, r, mu_s);
     vec3 result = ComputeDirectIrradiance(atmosphere, transmittance_texture, r, mu_s);

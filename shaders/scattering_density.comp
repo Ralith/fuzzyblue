@@ -140,7 +140,10 @@ layout (push_constant) uniform PerOrder {
 };
 
 void main() {
-    vec3 frag_coord = GetFragCoordFromTexel(gl_GlobalInvocationID, gl_NumWorkGroups);
+    vec3 frag_coord;
+    if (!GetScatteringFragCoord(atmosphere, gl_GlobalInvocationID, frag_coord)) {
+        return;
+    }
     vec3 density = ComputeScatteringDensityTexture(
         atmosphere, transmittance_texture, single_rayleigh_scattering_texture,
         single_mie_scattering_texture, multiple_scattering_texture,
