@@ -67,8 +67,11 @@ layout (set=0, binding=0) uniform Params {
 layout (set=1, binding=0, rgba16f) uniform writeonly image2D table;
 
 void main() {
-    float x_mu = gl_GlobalInvocationID.x / float(gl_NumWorkGroups.x - 1);
-    float x_r = gl_GlobalInvocationID.y / float(gl_NumWorkGroups.y - 1);
+    if (any(greaterThanEqual(gl_GlobalInvocationID.xy, uvec2(atmosphere.transmittance_texture_mu_size, atmosphere.transmittance_texture_r_size)))) {
+        return;
+    }
+    float x_mu = gl_GlobalInvocationID.x / float(atmosphere.transmittance_texture_mu_size - 1);
+    float x_r = gl_GlobalInvocationID.y / float(atmosphere.transmittance_texture_r_size - 1);
     vec2 rmu = GetRMuFromUnitRanges(atmosphere, x_mu, x_r);
     vec3 result = ComputeTransmittanceToTopAtmosphereBoundary(atmosphere, rmu.x, rmu.y);
     imageStore(table, ivec2(gl_GlobalInvocationID.xy), vec4(result, 1));
