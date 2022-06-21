@@ -11,7 +11,7 @@ vk-shader-macros = "0.2"
 
 [dev-dependencies]
 openexr = "0.7"
-half = "1"
+half = "2"
 renderdoc = { version = "0.9", default-features = false }
 bencher = "0.1.5"
 
